@@ -417,6 +417,15 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     run(&accepted); // expected to fail (EEXIST) - not asserted, only the log matters here
     debug_dump("immediately after run 3", scratch.path(), &accepted);
 
+    // TEMPORARY (ubuntu-26.04 flake investigation, ai-work/tasks/ci-debug-log-test.plan.md):
+    // testing whether the log write from run 3's process just hadn't
+    // landed yet by the time we read it here. `Command::status()`
+    // already blocks until the child fully exits, and `File::write` is
+    // unbuffered, so this shouldn't be possible on a normal POSIX
+    // filesystem - but it's cheap to rule out empirically rather than
+    // argue from first principles alone.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
     let log_text = std::fs::read_to_string(log_file.path()).unwrap();
     eprintln!("\n=== full log_file content ({} bytes) ===", log_text.len());
     eprintln!("{log_text}");

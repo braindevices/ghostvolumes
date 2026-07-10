@@ -306,8 +306,27 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
     }
 }
 
+/// TEMPORARY diagnostics for the ubuntu-26.04 CI flake investigation
+/// (ai-work/tasks/ci-debug-log-test.plan.md): writes unconditionally,
+/// bypassing `log_debug`/`log_ctx()` entirely, so it proves whether our
+/// `mkdir`/`mkdirat` symbols were entered at all - independent of
+/// whether the debug flag, cache load, or log-file open succeeded.
+fn diag_entry(msg: &str) {
+    if let Ok(mut diag) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("ghostvolumes-shim-diag.log"))
+    {
+        let _ = writeln!(diag, "[pid {}] {msg}", std::process::id());
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn mkdir(path: *const c_char, mode: u32) -> c_int {
+    diag_entry(&format!(
+        "ENTERED mkdir(path={:?})",
+        unsafe { CStr::from_ptr(path) }.to_string_lossy()
+    ));
     if let Some(target) = resolve_path(path, cwd) {
         if handle_intercept("mkdir", &target) {
             return 0;
@@ -318,6 +337,10 @@ pub extern "C" fn mkdir(path: *const c_char, mode: u32) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+    diag_entry(&format!(
+        "ENTERED mkdirat(dirfd={dirfd}, path={:?})",
+        unsafe { CStr::from_ptr(path) }.to_string_lossy()
+    ));
     if let Some(target) = resolve_path(path, || dirfd_path(dirfd)) {
         if handle_intercept("mkdirat", &target) {
             return 0;
