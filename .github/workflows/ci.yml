@@ -1,0 +1,197 @@
+name: CI
+
+# GitFlow-shaped trigger scope: master (release) and develop (pre-release),
+# plus hotfix/* and feature/* branches trigger CI directly on push. Any other
+# branch name doesn't trigger on push at all - it only gets CI once a PR
+# targeting one of these four is opened/updated (`pull_request.branches`
+# filters on the PR's *target*, not its source, so a PR from an arbitrary
+# branch into develop still triggers this).
+on:
+  push:
+    branches:
+      - master
+      - develop
+      - "hotfix/**"
+      - "feature/**"
+  pull_request:
+    branches:
+      - master
+      - develop
+      - "hotfix/**"
+      - "feature/**"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # This IS the project's real test tier, not a supplement to a mocked one -
+  # this whole suite exercises real BTRFS calls directly (no mocking layer,
+  # by deliberate design), so every BTRFS-dependent test only passes here
+  # because of the loop-mount setup below.
+  #
+  # Matrixed on OS, not Rust toolchain version: this suite is sensitive to
+  # kernel/btrfs-progs behavior (hand-declared raw ioctls, not the `btrfs`
+  # CLI, so there's no abstraction layer between us and exact kernel
+  # behavior), not language-version compatibility - a single `stable`
+  # toolchain covers that axis fine.
+  #
+  # ubuntu-26.04 is a preview runner image (no Actions SLA yet, pre-GA) -
+  # continue-on-error keeps it visibly running on every push/PR without
+  # letting a GitHub-side image hiccup block merges before it's earned that
+  # trust. Promote it once proven stable (or it reaches GA) by dropping the
+  # continue-on-error condition.
+  test:
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'ubuntu-26.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-24.04", "ubuntu-26.04"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install btrfs-progs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+      - name: Create loop-mounted btrfs filesystem
+        run: |
+          truncate -s 2G disk.img
+          LOOP=$(sudo losetup --find --show disk.img)
+          echo "LOOP_DEV=$LOOP" >> "$GITHUB_ENV"
+          sudo mkfs.btrfs -f "$LOOP"
+          sudo mkdir -p /mnt/ghostvolumes-test
+          sudo mount "$LOOP" /mnt/ghostvolumes-test
+          # btrfs subvolume create/delete both need only write permission on
+          # the parent dir (not root) once the fs is mounted - confirmed
+          # already this project's development, including that plain
+          # rmdir/remove_dir_all (not a special ioctl or
+          # `user_subvol_rm_allowed`) correctly deletes real subvolumes
+          # since kernel 4.18. So: hand the mount to the runner's own
+          # unprivileged user and let `cargo test` run unprivileged too,
+          # matching real usage - only this setup step needs sudo.
+          sudo chown -R "$(id -u):$(id -g)" /mnt/ghostvolumes-test
+          echo "GHOSTVOLUMES_TEST_BTRFS_DIR=/mnt/ghostvolumes-test" >> "$GITHUB_ENV"
+      - name: cargo test
+        run: cargo test
+      - name: cargo test --test btrfs_loopback -- --ignored (bonus, self-skipping)
+        # This is the self-contained unshare-based path from
+        # tests/btrfs_loopback.rs - separate from (and not required for) the
+        # sudo-mounted GHOSTVOLUMES_TEST_BTRFS_DIR above. Whether unshare
+        # --user --map-root-user --mount succeeds on this runner depends on
+        # whether unprivileged user namespaces are restricted here (Ubuntu's
+        # AppArmor-based restriction, present on some 24.04+ configurations) -
+        # unknown until this job actually runs on GitHub's infrastructure.
+        # Either way this step can't meaningfully fail the job: our own
+        # skip-detection reports an unsupported environment as a passing
+        # test (with an eprintln'd reason), not a failure - so this is purely
+        # informational, first real signal on whether that path works in GH
+        # Actions specifically.
+        run: cargo test --test btrfs_loopback -- --ignored --nocapture
+      - name: Unmount and detach loop device
+        if: always()
+        run: |
+          sudo umount /mnt/ghostvolumes-test || true
+          sudo losetup -d "$LOOP_DEV" || true
+
+  # Confirms §8.3's platform gating for real (native build+run), complementing
+  # the wasm32-unknown-unknown cross-compile check already done manually
+  # during development - that confirmed the *code* compiles correctly gated
+  # out on a non-Linux target, this confirms the *fallback binary* actually
+  # runs and exits the way real macOS/Windows users would see.
+  platform-gating:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build
+      - name: Run and confirm the non-Linux fallback message + exit code
+        # `cargo run` (not a hardcoded ./target/debug/ghostvolumes path) so
+        # this doesn't need to special-case Windows' .exe suffix.
+        shell: bash
+        run: |
+          set +e
+          output=$(cargo run --quiet 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          [ "$status" -ne 0 ] || { echo "expected a nonzero exit code"; exit 1; }
+          echo "$output" | grep -q "only supports Linux with BTRFS" || { echo "expected message not found"; exit 1; }
+
+  # Real interop check: a genuine snapper-managed BTRFS layout (not our own
+  # test fixtures simulating the .snapshots convention), verifying `scan`
+  # against the actual tool it's meant to detect. Snapper-only for now -
+  # Timeshift/btrbk detection (plan §3 point 2) isn't implemented yet, so
+  # there's nothing of ours to verify against those tools; see
+  # ai-work/tasks/ci.plan.md's "Snapper interop" section.
+  snapper-interop:
+    runs-on: ubuntu-24.04
+    # Unlike ubuntu-26.04's continue-on-error above (an external factor - a
+    # preview image with no SLA), this one is here because the exact snapper
+    # CLI behavior (create-config's flags, whether --no-dbus is required in
+    # a non-interactive runner, permissions on the resulting .snapshots)
+    # is researched but not yet run for real anywhere. Drop this once a real
+    # CI run confirms the job as written actually passes.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install btrfs-progs and snapper
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs snapper
+      - name: Create loop-mounted btrfs filesystem
+        run: |
+          truncate -s 2G disk.img
+          LOOP=$(sudo losetup --find --show disk.img)
+          echo "LOOP_DEV=$LOOP" >> "$GITHUB_ENV"
+          sudo mkfs.btrfs -f "$LOOP"
+          sudo mkdir -p /mnt/ghostvolumes-snapper-test
+          sudo mount "$LOOP" /mnt/ghostvolumes-snapper-test
+      - name: Configure a real snapper config on the mount
+        run: |
+          sudo snapper --no-dbus -c ghostvolumes-test create-config \
+            -f btrfs /mnt/ghostvolumes-snapper-test
+          # Confirm snapper actually did what §3 relies on, with a clear,
+          # attributable failure here rather than a confusing one two steps
+          # later in `ghostvolumes scan` if some snapper version/flag
+          # combination behaves differently than expected.
+          test -d /mnt/ghostvolumes-snapper-test/.snapshots
+          [ "$(stat -c '%i' /mnt/ghostvolumes-snapper-test/.snapshots)" = "256" ]
+      - name: Build
+        run: cargo build
+      - name: ghostvolumes scan detects the real snapper-managed mountpoint
+        run: |
+          ./target/debug/ghostvolumes scan | tee scan-output.txt
+          grep -qx "/mnt/ghostvolumes-snapper-test" scan-output.txt
+      - name: ghostvolumes scan --save + reload round-trip
+        run: |
+          export XDG_CONFIG_HOME=$RUNNER_TEMP/config
+          export XDG_DATA_HOME=$RUNNER_TEMP/data
+          ./target/debug/ghostvolumes scan --save
+          grep -q "/mnt/ghostvolumes-snapper-test" \
+            "$XDG_CONFIG_HOME/ghostvolumes/roots.d/00-auto.toml"
+          test -s "$XDG_DATA_HOME/ghostvolumes/compiled.tsv"
+      - name: Unmount and detach loop device
+        if: always()
+        run: |
+          sudo umount /mnt/ghostvolumes-snapper-test || true
+          sudo losetup -d "$LOOP_DEV" || true

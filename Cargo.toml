@@ -1,0 +1,21 @@
+[package]
+name = "ghostvolumes"
+version = "0.1.0"
+edition = "2024"
+description = "Isolate volatile build artifacts (node_modules, target, .venv, build) into unsnapshotted BTRFS subvolumes"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["btrfs", "subvolume", "snapshot", "build-cache"]
+categories = ["filesystem", "command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.6.1", features = ["derive"] }
+libc = "0.2.186"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
