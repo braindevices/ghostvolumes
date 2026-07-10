@@ -142,6 +142,41 @@ fn is_subvolume(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Diagnostic-only: dumps `tree`'s view of `root` (with inode numbers, so
+/// subvolume roots at inode 256 are visible directly) and `stat`'s view of
+/// `target`, both via real external processes independent of anything the
+/// shim itself observed. Printed with `eprintln!` so libtest's output
+/// capture surfaces it automatically under the failing test's output
+/// section, no `--nocapture` required.
+fn debug_dump(label: &str, root: &Path, target: &Path) {
+    eprintln!("\n=== DEBUG DUMP [{label}] ===");
+    eprintln!("--- tree -a -p --inodes {} ---", root.display());
+    match Command::new("tree")
+        .args(["-a", "-p", "--inodes"])
+        .arg(root)
+        .output()
+    {
+        Ok(o) => {
+            eprint!("{}", String::from_utf8_lossy(&o.stdout));
+            if !o.stderr.is_empty() {
+                eprintln!("[tree stderr] {}", String::from_utf8_lossy(&o.stderr));
+            }
+        }
+        Err(e) => eprintln!("[tree unavailable: {e}]"),
+    }
+    eprintln!("--- stat {} ---", target.display());
+    match Command::new("stat").arg(target).output() {
+        Ok(o) => {
+            eprint!("{}", String::from_utf8_lossy(&o.stdout));
+            if !o.stderr.is_empty() {
+                eprint!("[stat stderr] {}", String::from_utf8_lossy(&o.stderr));
+            }
+        }
+        Err(e) => eprintln!("[stat unavailable: {e}]"),
+    }
+    eprintln!("=== END DEBUG DUMP [{label}] ===\n");
+}
+
 #[test]
 fn matching_name_under_configured_root_becomes_a_subvolume() {
     let scratch = btrfs_scratch_dir();
@@ -331,6 +366,11 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
     let log_file = tempfile::NamedTempFile::new().unwrap();
+    // Every run() call below passes this exact path via GHOSTVOLUMES_LOG_FILE
+    // explicitly - printed here so a real CI run's captured output settles,
+    // in one place, whether every call really shared one log file (as
+    // intended) or something caused a different path to be used/read.
+    eprintln!("log_file.path() = {}", log_file.path().display());
 
     let run = |target: &Path| {
         Command::new("mkdir")
@@ -344,16 +384,37 @@ fn debug_mode_logs_every_decision_with_its_reason() {
             .unwrap()
     };
 
-    // ACCEPT: matches, gets created.
     let accepted = scratch.path().join("node_modules");
-    assert!(run(&accepted).success());
-    // SKIP (no cache match): unrelated name.
     let no_match = scratch.path().join("unrelated");
+
+    debug_dump("before any mkdir", scratch.path(), &accepted);
+
+    // ACCEPT: matches, gets created.
+    assert!(run(&accepted).success());
+    debug_dump("after run 1 (expected ACCEPT)", scratch.path(), &accepted);
+
+    // SKIP (no cache match): unrelated name.
     assert!(run(&no_match).success());
+    debug_dump(
+        "after run 2 (expected SKIP no-match)",
+        scratch.path(),
+        &accepted,
+    );
+
     // SKIP (already a subvolume): re-run against the now-existing one.
+    debug_dump(
+        "immediately before run 3 (expected SKIP already-subvolume)",
+        scratch.path(),
+        &accepted,
+    );
     run(&accepted); // expected to fail (EEXIST) - not asserted, only the log matters here
+    debug_dump("immediately after run 3", scratch.path(), &accepted);
 
     let log_text = std::fs::read_to_string(log_file.path()).unwrap();
+    eprintln!("\n=== full log_file content ({} bytes) ===", log_text.len());
+    eprintln!("{log_text}");
+    eprintln!("=== end log_file content ===\n");
+
     assert!(log_text.contains("-> ACCEPT (created subvolume)"));
     assert!(log_text.contains("-> SKIP (no cache match)"));
     assert!(log_text.contains("-> SKIP (already a subvolume)"));

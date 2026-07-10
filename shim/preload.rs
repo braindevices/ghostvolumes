@@ -216,7 +216,9 @@ fn decide(target: &Path) -> Decision {
     if !cache_core::names_for(rows, parent).contains(name) {
         return Decision::NoCacheMatch;
     }
-    if btrfs_core::is_subvolume(target).unwrap_or(false) {
+    let subvol_check = btrfs_core::is_subvolume(target);
+    log_debug(|| format!("{} is_subvolume() raw result -> {subvol_check:?}", target.display()));
+    if subvol_check.unwrap_or(false) {
         return Decision::AlreadySubvolume;
     }
     if git_core::is_git_tracked(target) {
