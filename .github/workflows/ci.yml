@@ -1,6 +1,6 @@
 name: CI
 
-# GitFlow-shaped trigger scope: master (release) and develop (pre-release),
+# GitFlow-shaped trigger scope: main (release) and develop (pre-release),
 # plus hotfix/* and feature/* branches trigger CI directly on push. Any other
 # branch name doesn't trigger on push at all - it only gets CI once a PR
 # targeting one of these four is opened/updated (`pull_request.branches`
@@ -9,13 +9,13 @@ name: CI
 on:
   push:
     branches:
-      - master
+      - main
       - develop
       - "hotfix/**"
       - "feature/**"
   pull_request:
     branches:
-      - master
+      - main
       - develop
       - "hotfix/**"
       - "feature/**"
