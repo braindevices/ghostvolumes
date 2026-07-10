@@ -39,6 +39,12 @@ fn is_git_tracked_with_bin(git_bin: &str, path: &Path) -> bool {
         .arg("ls-files")
         .arg("--")
         .arg(relative)
+        // Inside the LD_PRELOAD shim, this env var is set on the shim's
+        // own host process precisely so *user* commands get intercepted -
+        // but this `git` call is the shim checking its own internal
+        // git-tracked gate, not a user action, and must not recursively
+        // load (and re-run the constructor of) itself.
+        .env_remove("LD_PRELOAD")
         .output();
 
     match output {
