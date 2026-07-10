@@ -84,7 +84,17 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" /mnt/ghostvolumes-test
           echo "GHOSTVOLUMES_TEST_BTRFS_DIR=/mnt/ghostvolumes-test" >> "$GITHUB_ENV"
       - name: cargo test
-        run: cargo test
+        # --test-threads=1: every BTRFS-touching test already uses its own
+        # unique tempdir (tempfile::tempdir_in), so paths never collide -
+        # but BTRFS_IOC_SUBVOL_CREATE contends on a filesystem-wide lock
+        # in the kernel, not a per-directory one. Running dozens of these
+        # concurrently (cargo test's default is one thread per core) was
+        # seen to make an unrelated, already-created subvolume transiently
+        # fail its own stat() re-check on the ubuntu-26.04 preview runner -
+        # see ai-work/tasks/ci-debug-log-test.plan.md. Serializing removes
+        # that whole class of contention; the suite is small enough that
+        # this costs a fraction of a second either way.
+        run: cargo test -- --test-threads=1
       - name: cargo test --test btrfs_loopback -- --ignored (bonus, self-skipping)
         # This is the self-contained unshare-based path from
         # tests/btrfs_loopback.rs - separate from (and not required for) the
