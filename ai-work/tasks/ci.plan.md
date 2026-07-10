@@ -42,7 +42,7 @@ subvolumize-home reference:
 ```yaml
 name: CI
 
-# GitFlow-shaped trigger scope: master (release) and develop (pre-release),
+# GitFlow-shaped trigger scope: main (release) and develop (pre-release),
 # plus hotfix/* and feature/* branches trigger CI directly on push. Any other
 # branch name doesn't trigger on push at all - it only gets CI once a PR
 # targeting one of these four is opened/updated (`pull_request.branches`
@@ -51,13 +51,13 @@ name: CI
 on:
   push:
     branches:
-      - master
+      - main
       - develop
       - "hotfix/**"
       - "feature/**"
   pull_request:
     branches:
-      - master
+      - main
       - develop
       - "hotfix/**"
       - "feature/**"
@@ -341,8 +341,8 @@ explicitly deferred and **was never implemented**. So:
   (required) + `ubuntu-26.04` (preview, non-blocking).
 - `Swatinem/rust-cache@v2` included from the start, in every job.
 - Trigger scope is GitFlow-shaped, not "every branch" like the reference:
-  `push` + `pull_request` on `master`, `develop`, `hotfix/**`, `feature/**`
-  only — `master` is the future release branch, `develop` is pre-release. A
+  `push` + `pull_request` on `main`, `develop`, `hotfix/**`, `feature/**`
+  only — `main` is the future release branch, `develop` is pre-release. A
   branch matching none of these patterns never triggers CI on push; it only
   gets a run once a PR targeting one of the four is opened/updated.
 - No `publish-dry-run` (nor a real `release`/`cargo publish` job) in this
