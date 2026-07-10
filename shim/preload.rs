@@ -91,7 +91,8 @@ struct LogContext {
 /// logging," same never-panic-never-break-the-host-process posture as
 /// `load_cache`.
 fn load_log_context() -> LogContext {
-    let debug = match std::env::var("GHOSTVOLUMES_DEBUG") {
+    let debug_raw = std::env::var("GHOSTVOLUMES_DEBUG");
+    let debug = match &debug_raw {
         Ok(value) => !value.is_empty() && value != "0",
         Err(_) => false,
     };
@@ -101,9 +102,36 @@ fn load_log_context() -> LogContext {
         .map(PathBuf::from)
         .or_else(|| resolved_data_dir().map(|dir| dir.join("shim.log")));
 
-    let file = log_path
-        .and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok())
-        .map(Mutex::new);
+    let open_result =
+        log_path.as_ref().map(|path| std::fs::OpenOptions::new().create(true).append(true).open(path));
+
+    // TEMPORARY diagnostics for the ubuntu-26.04 CI flake investigation
+    // (ai-work/tasks/ci-debug-log-test.plan.md): the *intended* log file
+    // was observed to receive zero lines at all for one specific
+    // invocation, as if this whole function's outcome differed from its
+    // neighbors. Recorded unconditionally (not gated on `debug`, since a
+    // misread of GHOSTVOLUMES_DEBUG itself is one of the possibilities
+    // under test) to a side-channel path, so it survives even when the
+    // intended log file couldn't be opened.
+    if let Ok(mut diag) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("ghostvolumes-shim-diag.log"))
+    {
+        let open_summary = match &open_result {
+            Some(Ok(_)) => "Some(Ok)".to_string(),
+            Some(Err(e)) => format!("Some(Err({e:?}))"),
+            None => "None".to_string(),
+        };
+        let _ = writeln!(
+            diag,
+            "[pid {}] argv0={:?} GHOSTVOLUMES_DEBUG={debug_raw:?} debug={debug} log_path={log_path:?} open_result={open_summary}",
+            std::process::id(),
+            std::env::args().next(),
+        );
+    }
+
+    let file = open_result.and_then(|r| r.ok()).map(Mutex::new);
 
     LogContext { file, debug }
 }

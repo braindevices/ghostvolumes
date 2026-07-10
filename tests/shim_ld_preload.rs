@@ -387,6 +387,13 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     let accepted = scratch.path().join("node_modules");
     let no_match = scratch.path().join("unrelated");
 
+    // Reset the shim's side-channel diagnostic file so only this test's
+    // own 3 invocations show up below, not leftovers from earlier tests
+    // in this same binary (every test in this file loads the shim, which
+    // writes to this same fixed path on every invocation).
+    let diag_path = std::env::temp_dir().join("ghostvolumes-shim-diag.log");
+    let _ = std::fs::remove_file(&diag_path);
+
     debug_dump("before any mkdir", scratch.path(), &accepted);
 
     // ACCEPT: matches, gets created.
@@ -414,6 +421,22 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     eprintln!("\n=== full log_file content ({} bytes) ===", log_text.len());
     eprintln!("{log_text}");
     eprintln!("=== end log_file content ===\n");
+
+    match std::fs::read_to_string(&diag_path) {
+        Ok(diag_text) => {
+            eprintln!(
+                "\n=== shim side-channel diagnostics ({} bytes, {}) ===",
+                diag_text.len(),
+                diag_path.display()
+            );
+            eprintln!("{diag_text}");
+            eprintln!("=== end shim side-channel diagnostics ===\n");
+        }
+        Err(e) => eprintln!(
+            "\n[no shim side-channel diagnostics at {}: {e}]\n",
+            diag_path.display()
+        ),
+    }
 
     assert!(log_text.contains("-> ACCEPT (created subvolume)"));
     assert!(log_text.contains("-> SKIP (no cache match)"));
