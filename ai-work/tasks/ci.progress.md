@@ -69,6 +69,27 @@ None.
 ### Issues found / fixed
 None found locally (couldn't run this job's core logic locally at all, per the environment note above) — genuinely first-real-run-dependent, flagged as such via `continue-on-error` and the plan's own step 5.
 
+**2026-07-11, post-real-run:** `scan --save + reload round-trip` failed
+silently (exit 1, zero output — `set -e` tripping on a `grep -q`/`test -s`
+whose own semantics never print anything either way). Root cause:
+this job never ran `ghostvolumes init` before `scan --save`, so no
+`watched.d` names were configured at all; `cache::compile()` correctly
+produces a *genuinely empty* `compiled.tsv` when there are zero watched
+names, even with a real root present — `test -s` then (silently) fails.
+Fixed by adding `./target/debug/ghostvolumes init` before `scan --save`
+(seeds default watched names, matching real first-time usage), and by
+replacing the silent `grep -q`/`test -s` checks with explicit,
+existence-vs-content-distinguishing ones: each file is checked for
+*existence* first (`::error::$file does not exist`, plus a directory
+listing) and only then for *content* (`::error::$file exists but does
+not contain ...` / `::error::$file exists but is empty (0 bytes)`), so
+a future break says exactly which of the two happened instead of one
+ambiguous "missing or empty" message. Verified locally: `ghostvolumes
+init` + a manual `reload` against this sandbox's own real BTRFS root
+produces a correctly non-empty `compiled.tsv`, and both diagnostic
+branches (missing vs. empty) were manually triggered to confirm they
+print the right message.
+
 ## Step 4 — `.github/workflows/ci.yml`: `platform-gating` job
 **Status**: done
 **Date**: 2026-07-10
