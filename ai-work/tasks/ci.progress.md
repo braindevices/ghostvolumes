@@ -35,7 +35,29 @@ Matrixed `ubuntu-24.04` (required) / `ubuntu-26.04` (preview, `continue-on-error
 ### Deviations from plan
 None.
 ### Issues found / fixed
-None.
+**2026-07-10, post-first-real-run:** the first actual GitHub Actions run
+of this job (before a GitHub remote existed locally, so unseen until the
+user ran it and shared the log) hit a real, fully deterministic failure
+on the `ubuntu-26.04` leg only: `debug_mode_logs_every_decision_with_its_reason`
+failed a log assertion. Root cause (confirmed by reading both
+implementations' actual source): Ubuntu 26.04 (devel) has switched its
+default `coreutils` package to the Rust `uutils/coreutils`
+reimplementation, whose `mkdir` calls `path.exists()` (a `stat()`, not
+`mkdir()`/`mkdirat()`) before attempting creation and short-circuits
+immediately when the target already exists — so this shim's intercepted
+symbols are never entered for that case, unlike GNU coreutils (still
+default on 24.04), which always calls `mkdir()` first unconditionally.
+Not a race, not a concurrency issue (a `--test-threads=1` attempt along
+the way didn't help, as expected once the real cause was found). Fixed
+by making the test tolerate either `mkdir` implementation: a permanent
+`-> ENTER` debug-log line (`shim/preload.rs`) now distinguishes "shim
+entered but decided X" from "shim never entered," and the test asserts
+the actual invariant (never a second subvolume, still a real subvolume
+afterward) instead of assuming a specific libc call pattern. Also found
+and fixed, along the way, an unrelated real bug: `shim/git_core.rs`'s
+internal `git` invocation wasn't stripping `LD_PRELOAD`, causing it to
+recursively (harmlessly, but wastefully) reload the shim into itself.
+See `ai-work/tasks/ci-debug-log-test.plan.md` for the full investigation.
 
 ## Step 3 — `.github/workflows/ci.yml`: `snapper-interop` job
 **Status**: done
