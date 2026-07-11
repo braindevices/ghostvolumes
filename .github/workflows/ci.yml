@@ -186,10 +186,38 @@ jobs:
         run: |
           export XDG_CONFIG_HOME=$RUNNER_TEMP/config
           export XDG_DATA_HOME=$RUNNER_TEMP/data
+          # `init` first: a real user runs this once to seed
+          # roots.d/watched.d/projects.d (including the default watched-name
+          # list) before scan/reload ever compile anything. Without it,
+          # `scan --save` still writes roots.d/00-auto.toml correctly, but
+          # reload() has zero watched names to compile against, so
+          # compiled.tsv ends up existing but empty - which the old silent
+          # `grep -q`/`test -s` checks below failed on with zero explanation.
+          ./target/debug/ghostvolumes init
           ./target/debug/ghostvolumes scan --save
-          grep -q "/mnt/ghostvolumes-snapper-test" \
-            "$XDG_CONFIG_HOME/ghostvolumes/roots.d/00-auto.toml"
-          test -s "$XDG_DATA_HOME/ghostvolumes/compiled.tsv"
+
+          roots_file="$XDG_CONFIG_HOME/ghostvolumes/roots.d/00-auto.toml"
+          if [ ! -f "$roots_file" ]; then
+            echo "::error::$roots_file does not exist"
+            ls -la "$(dirname "$roots_file")" 2>&1 || echo "::error::$(dirname "$roots_file") does not exist either"
+            exit 1
+          fi
+          if ! grep -q "/mnt/ghostvolumes-snapper-test" "$roots_file"; then
+            echo "::error::$roots_file exists but does not contain the expected mountpoint"
+            cat "$roots_file"
+            exit 1
+          fi
+
+          cache_file="$XDG_DATA_HOME/ghostvolumes/compiled.tsv"
+          if [ ! -f "$cache_file" ]; then
+            echo "::error::$cache_file does not exist"
+            ls -la "$(dirname "$cache_file")" 2>&1 || echo "::error::$(dirname "$cache_file") does not exist either"
+            exit 1
+          fi
+          if [ ! -s "$cache_file" ]; then
+            echo "::error::$cache_file exists but is empty (0 bytes)"
+            exit 1
+          fi
       - name: Unmount and detach loop device
         if: always()
         run: |
