@@ -84,18 +84,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" /mnt/ghostvolumes-test
           echo "GHOSTVOLUMES_TEST_BTRFS_DIR=/mnt/ghostvolumes-test" >> "$GITHUB_ENV"
       - name: cargo test
-        # --test-threads=1 alone did NOT fix the ubuntu-26.04-only flake in
-        # debug_mode_logs_every_decision_with_its_reason (still reproduced
-        # even fully serialized), which rules out cross-test/cross-thread
-        # contention as the cause - see ai-work/tasks/ci-debug-log-test.plan.md.
-        # Kept anyway since it removes a real (if not the culprit) source of
-        # concurrent BTRFS_IOC_SUBVOL_CREATE contention at negligible cost.
-        # --show-output: the test now dumps `tree`/`stat`/raw log content at
-        # each step (diagnostic instrumentation, temporary) - showing captured
-        # output for successful tests too, not just failures, so the
-        # ubuntu-24.04 leg's (passing) dump can be diffed against 26.04's
-        # (failing) one to see exactly where they diverge.
-        run: cargo test -- --test-threads=1 --show-output
+        run: cargo test
       - name: cargo test --test btrfs_loopback -- --ignored (bonus, self-skipping)
         # This is the self-contained unshare-based path from
         # tests/btrfs_loopback.rs - separate from (and not required for) the

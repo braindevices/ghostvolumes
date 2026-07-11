@@ -142,41 +142,6 @@ fn is_subvolume(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Diagnostic-only: dumps `tree`'s view of `root` (with inode numbers, so
-/// subvolume roots at inode 256 are visible directly) and `stat`'s view of
-/// `target`, both via real external processes independent of anything the
-/// shim itself observed. Printed with `eprintln!` so libtest's output
-/// capture surfaces it automatically under the failing test's output
-/// section, no `--nocapture` required.
-fn debug_dump(label: &str, root: &Path, target: &Path) {
-    eprintln!("\n=== DEBUG DUMP [{label}] ===");
-    eprintln!("--- tree -a -p --inodes {} ---", root.display());
-    match Command::new("tree")
-        .args(["-a", "-p", "--inodes"])
-        .arg(root)
-        .output()
-    {
-        Ok(o) => {
-            eprint!("{}", String::from_utf8_lossy(&o.stdout));
-            if !o.stderr.is_empty() {
-                eprintln!("[tree stderr] {}", String::from_utf8_lossy(&o.stderr));
-            }
-        }
-        Err(e) => eprintln!("[tree unavailable: {e}]"),
-    }
-    eprintln!("--- stat {} ---", target.display());
-    match Command::new("stat").arg(target).output() {
-        Ok(o) => {
-            eprint!("{}", String::from_utf8_lossy(&o.stdout));
-            if !o.stderr.is_empty() {
-                eprint!("[stat stderr] {}", String::from_utf8_lossy(&o.stderr));
-            }
-        }
-        Err(e) => eprintln!("[stat unavailable: {e}]"),
-    }
-    eprintln!("=== END DEBUG DUMP [{label}] ===\n");
-}
-
 #[test]
 fn matching_name_under_configured_root_becomes_a_subvolume() {
     let scratch = btrfs_scratch_dir();
@@ -366,11 +331,6 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
     let log_file = tempfile::NamedTempFile::new().unwrap();
-    // Every run() call below passes this exact path via GHOSTVOLUMES_LOG_FILE
-    // explicitly - printed here so a real CI run's captured output settles,
-    // in one place, whether every call really shared one log file (as
-    // intended) or something caused a different path to be used/read.
-    eprintln!("log_file.path() = {}", log_file.path().display());
 
     let run = |target: &Path| {
         Command::new("mkdir")
@@ -384,72 +344,54 @@ fn debug_mode_logs_every_decision_with_its_reason() {
             .unwrap()
     };
 
-    let accepted = scratch.path().join("node_modules");
-    let no_match = scratch.path().join("unrelated");
-
-    // Reset the shim's side-channel diagnostic file so only this test's
-    // own 3 invocations show up below, not leftovers from earlier tests
-    // in this same binary (every test in this file loads the shim, which
-    // writes to this same fixed path on every invocation).
-    let diag_path = std::env::temp_dir().join("ghostvolumes-shim-diag.log");
-    let _ = std::fs::remove_file(&diag_path);
-
-    debug_dump("before any mkdir", scratch.path(), &accepted);
-
     // ACCEPT: matches, gets created.
+    let accepted = scratch.path().join("node_modules");
     assert!(run(&accepted).success());
-    debug_dump("after run 1 (expected ACCEPT)", scratch.path(), &accepted);
-
     // SKIP (no cache match): unrelated name.
+    let no_match = scratch.path().join("unrelated");
     assert!(run(&no_match).success());
-    debug_dump(
-        "after run 2 (expected SKIP no-match)",
-        scratch.path(),
-        &accepted,
-    );
-
-    // SKIP (already a subvolume): re-run against the now-existing one.
-    debug_dump(
-        "immediately before run 3 (expected SKIP already-subvolume)",
-        scratch.path(),
-        &accepted,
-    );
-    run(&accepted); // expected to fail (EEXIST) - not asserted, only the log matters here
-    debug_dump("immediately after run 3", scratch.path(), &accepted);
-
-    // TEMPORARY (ubuntu-26.04 flake investigation, ai-work/tasks/ci-debug-log-test.plan.md):
-    // testing whether the log write from run 3's process just hadn't
-    // landed yet by the time we read it here. `Command::status()`
-    // already blocks until the child fully exits, and `File::write` is
-    // unbuffered, so this shouldn't be possible on a normal POSIX
-    // filesystem - but it's cheap to rule out empirically rather than
-    // argue from first principles alone.
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    // Re-run against the now-existing subvolume. Exit status isn't
+    // asserted: some `mkdir` implementations (e.g. uutils' Rust
+    // coreutils, now the default `mkdir` on newer Ubuntu releases)
+    // `stat()` an already-existing target and report their own "File
+    // exists" error without ever calling `mkdir()`/`mkdirat()` at all -
+    // so the shim may not even be *entered* for this call. That's a
+    // real, legitimate difference between `mkdir` implementations, not
+    // a bug: nothing the shim is responsible for (creating or
+    // converting a directory) happens either way. The assertions below
+    // check that invariant directly instead of assuming any particular
+    // libc call pattern from whichever `mkdir` binary is installed.
+    run(&accepted);
 
     let log_text = std::fs::read_to_string(log_file.path()).unwrap();
-    eprintln!("\n=== full log_file content ({} bytes) ===", log_text.len());
-    eprintln!("{log_text}");
-    eprintln!("=== end log_file content ===\n");
-
-    match std::fs::read_to_string(&diag_path) {
-        Ok(diag_text) => {
-            eprintln!(
-                "\n=== shim side-channel diagnostics ({} bytes, {}) ===",
-                diag_text.len(),
-                diag_path.display()
-            );
-            eprintln!("{diag_text}");
-            eprintln!("=== end shim side-channel diagnostics ===\n");
-        }
-        Err(e) => eprintln!(
-            "\n[no shim side-channel diagnostics at {}: {e}]\n",
-            diag_path.display()
-        ),
-    }
-
     assert!(log_text.contains("-> ACCEPT (created subvolume)"));
     assert!(log_text.contains("-> SKIP (no cache match)"));
-    assert!(log_text.contains("-> SKIP (already a subvolume)"));
+
+    // `-> ENTER` is logged before `decide()` even runs (see
+    // handle_intercept), so it tells apart "the shim was entered but
+    // decided X" from "the shim was never entered for this call at
+    // all". Exactly 1 occurrence means only run 1's create reached it
+    // (run 3's `mkdir` resolved existence on its own); exactly 2 means
+    // run 3 reached it too, in which case it must have logged the
+    // correct reason.
+    let enter_marker = format!("{} -> ENTER", accepted.display());
+    match log_text.matches(&enter_marker).count() {
+        1 => {}
+        2 => assert!(
+            log_text.contains("-> SKIP (already a subvolume)"),
+            "shim was entered for the re-run but didn't log the expected decision:\n{log_text}"
+        ),
+        n => panic!("expected 1 or 2 '{enter_marker}' occurrences, got {n}:\n{log_text}"),
+    }
+
+    // Whichever path the host's `mkdir` took, the shim must never have
+    // created a second subvolume for an already-existing path.
+    assert_eq!(
+        log_text.matches("-> ACCEPT (created subvolume)").count(),
+        1,
+        "must never create a second subvolume for an already-existing path:\n{log_text}"
+    );
+    assert!(is_subvolume(&accepted));
 }
 
 #[test]
