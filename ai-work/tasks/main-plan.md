@@ -2,17 +2,32 @@
 
 **Goal:** Automatically isolate volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, etc.) into unsnapshotted BTRFS subvolumes, with zero sudo at runtime and effectively zero overhead for the common case.
 
+**Superseded in part by `ai-work/tasks/decision-model.plan.md`:** the
+git-tracked gate (§4), the cd-hook / `ensure` (§6), and per-project
+`.ghostvolumes.toml`/`projects.d` config (§2, §7, §8.0's "proactive"
+column) were all replaced by an explicit approve/deny decision-file
+model — see that doc for the current design and why. Kept here,
+unedited, as the historical record of the original design and its
+reasoning; sections below are annotated with a pointer wherever
+they've been superseded rather than rewritten in place.
+
 ---
 
 ## 1. Scope for this phase
 
 - **Interception mechanism:** LD_PRELOAD only. Seccomp/ptrace-based syscall interception (needed to catch statically-linked binaries, e.g. the musl-static `uv` build used in its official Docker images) is **shelved** until observed as a real problem in practice.
 - **Snapshot-manager detection:** no runtime probing. Fully resolved ahead of time by `ghostvolumes scan --save` (or hand-edited) into a static config that the runtime hot path just reads.
-- **Git-tracked content:** never touched — neither proactively created nor converted. This is a scope boundary, not a workaround: GhostVolumes isolates *disposable* artifacts, and anything git-tracked is by definition not disposable. (Note: `rmdir()` has been able to remove populated/empty BTRFS subvolumes like normal directories since kernel 4.18, so this exclusion is about intent, not a filesystem limitation.)
+- **Git-tracked content:** never touched — neither proactively created nor converted. This is a scope boundary, not a workaround: GhostVolumes isolates *disposable* artifacts, and anything git-tracked is by definition not disposable. (Note: `rmdir()` has been able to remove populated/empty BTRFS subvolumes like normal directories since kernel 4.18, so this exclusion is about intent, not a filesystem limitation.) **Superseded:** git-tracked-ness specifically is no longer checked at all — VCS detection was dropped entirely in favor of an explicit decision-file model that works the same regardless of VCS (`ai-work/tasks/decision-model.plan.md`, "Problem with the current design"). The underlying *intent* (never silently convert something that isn't disposable) is unchanged; it's just enforced by a recorded human decision now, not a `git ls-files` check.
 
 ---
 
 ## 2. Config layout — drop-in style
+
+> **Superseded:** `projects.d/` and repo-local `.ghostvolumes.toml`
+> (the per-project `watch`/`proactive` config below) no longer exist —
+> decision files are the entire per-project mechanism now
+> (`ai-work/tasks/decision-model.plan.md` §1, §7). `roots.d/` and
+> `watched.d/` are unaffected and still work exactly as described here.
 
 Defaults to XDG user paths (`~/.config/ghostvolumes/`, `~/.local/share/ghostvolumes/`) rather than `/etc`, since `cargo install` is inherently a per-user mechanism with no root step and no postinstall hook. `/etc/ghostvolumes/` is supported as an optional lower-precedence tier for shared multi-user machines (loaded first, user config layers on top with the same merge rules), but nothing in the default flow requires it or requires sudo to set up.
 
@@ -87,6 +102,17 @@ ghostvolumes scan --save     # atomically writes roots.d/00-auto.toml
 
 ## 4. Path-matching logic (shared by both runtime code paths)
 
+> **Partially superseded:** `resolve_watch_names`'s root/name matching
+> (compiled into `compiled.tsv` rows) is still exactly how the shim
+> decides *whether a path is watched at all* — unaffected. But
+> `resolve_proactive_names` and the "Git-tracked gate" subsection below
+> are both gone entirely: no proactive/cd-hook path exists anymore, and
+> the git-tracked gate was replaced by the decision-file model
+> (`ai-work/tasks/decision-model.plan.md` §1-§4). `decide()`'s current
+> logic in `shim/preload.rs` is: root/name match (as below) → already a
+> subvolume? → `GHOSTVOLUMES_AUTO_YES`? → decision-file walk-up
+> (`+`/`-`/undecided).
+
 ```
 resolve_watch_names(path, roots, global_defaults, projects):   # used by LD_PRELOAD — reactive
     if path is not under any entry in roots:
@@ -110,7 +136,7 @@ Key rules baked into this:
 - **Proactive (cd-hook) requires an explicit per-project opt-in.** No project match → no pre-creation. This avoids blindly creating four empty subvolumes in every directory the user happens to `cd` into.
 - `proactive` names are automatically part of the reactive set — no need to list a name in both `watch` and `proactive`.
 
-### Git-tracked gate
+### Git-tracked gate (superseded — see note above)
 ```
 is_git_tracked(path):
     repo_root = walk up from path looking for .git (tolerate "not a repo")
@@ -128,12 +154,18 @@ Cheap to check: only runs after the name/prefix filter already matched (a handfu
 
 ## 5. LD_PRELOAD hook (reactive, runtime)
 
+> Point 6 below is superseded: "not git-tracked" is now "resolves to a
+> `+` decision" (decision-file walk-up, bounded by the nearest
+> registered project-root — `ai-work/tasks/decision-model.plan.md`
+> §3-§4), and the default when nothing resolves is *skip*, not accept.
+> Points 1-5 and 7 are unaffected.
+
 1. `constructor` function reads the compiled `compiled.tsv` cache (see §8.0) once at process start into an in-memory `(prefix, name)` list — no TOML parsing happens in the shim itself.
 2. Intercepts **both** `mkdir` and `mkdirat` — confirmed via testing that real tools use either (glibc `uv` build used only `mkdir`; other tools/libc versions commonly use `mkdirat`).
 3. Resolves the target to an absolute path: a relative `mkdir` path is prefixed with `getcwd()`; a relative `mkdirat` path against a non-`AT_FDCWD` dirfd is resolved via `readlink("/proc/self/fd/<dirfd>")` — the only portable way to recover a path from a bare fd without extra crates — then joined. Real-world traces show a mix of absolute and relative arguments even within a single tool invocation, so both must be handled.
 4. **Root-prefix check first, before any name matching.** LD_PRELOAD intercepts every `mkdir`/`mkdirat` call system-wide, so the hot path must reject the overwhelming majority of calls (anything outside GhostVolumes-managed territory) as cheaply as possible: a handful of string-prefix comparisons against the `roots` list. Every row in `compiled.tsv` is already rooted under one of these prefixes (§8.0), so in practice this check and the name lookup below can be one pass over the compiled rows — but conceptually root-rejection is the fastest, first-line filter, and nothing more expensive happens for a path outside every configured root.
 5. Checks resolved path against `resolve_watch_names()` for the parent directory (only reached once the root check above passes).
-6. If matched, not already a subvolume (`st_ino != 256`), and not git-tracked → issue `BTRFS_IOC_SUBVOL_CREATE` instead of the real call. This order is deliberate: `stat()` (cheap-ish syscall) before shelling out to `git` (much more expensive) — never do the expensive check before the cheap one already ruled things out.
+6. ~~If matched, not already a subvolume (`st_ino != 256`), and not git-tracked → issue `BTRFS_IOC_SUBVOL_CREATE` instead of the real call. This order is deliberate: `stat()` (cheap-ish syscall) before shelling out to `git` (much more expensive) — never do the expensive check before the cheap one already ruled things out.~~
 7. Tolerates `EEXIST` gracefully — real traces show tools retry directory creation bottom-up after an initial `ENOENT` on the leaf, which looks like duplicate `mkdir` calls for the same path.
 
 **Validated in testing:** a glibc-dynamically-linked `uv venv` run showed the hook correctly intercepting every `mkdir` call for `.venv`, `bin/`, `lib/python3.14/site-packages`, etc., including the duplicate-call and mixed absolute/relative path patterns described above.
@@ -143,6 +175,18 @@ Cheap to check: only runs after the name/prefix filter already matched (a handfu
 ---
 
 ## 6. cd-hook (proactive, runtime)
+
+> **Superseded — removed entirely, not replaced by an equivalent**
+> (`ai-work/tasks/decision-model.plan.md` §5, §7). Its three
+> responsibilities each landed somewhere else: proactive pre-creation
+> is now `ghostvolumes convert <path>` creating a not-yet-existing path
+> directly as an empty subvolume (§6 there); repo-local-config
+> registration is moot now that there's no rich per-project config file
+> left to register (only a lightweight project-root *path* needs
+> registering, via `ghostvolumes register` or `convert`'s own
+> side-effect); plain-directory warnings are covered by `intercept`'s
+> post-run notice. `shell-init` now only emits the `LD_PRELOAD` export
+> — no `cd` wrapper/`chpwd` hook.
 
 - Shipped as a thin shell snippet (bash `cd` wrapper / zsh `chpwd`) that shells out to a fast binary: `ghostvolumes ensure "$PWD"`. All matching logic lives in the shared binary, not duplicated in shell.
 - `ensure` reads `compiled.tsv` (§8.0) for its fast prefix check — the same flat cache the shim reads. It does not re-parse/re-merge the `*.d/` TOML on every `cd`; that would defeat the "must stay cheap" goal below.
@@ -163,6 +207,14 @@ Cheap to check: only runs after the name/prefix filter already matched (a handfu
 ## 7. Supporting subcommands
 
 ### `ghostvolumes discover [PATH] [--max-depth N] [--save]`
+
+> **Superseded:** the walk/inode-256 check below is unchanged, but the
+> git-tracked gate is gone (no more skipped-vs-suggested split) and the
+> output format is `+ name` decision-file lines per project, not
+> `projects.d` TOML blocks — `--save` now appends directly to each
+> project's own decision file. See
+> `ai-work/tasks/decision-model.plan.md` §7.
+
 Bootstraps `projects.d` entries from subvolumes that already exist (pre-adoption or manual `btrfs subvolume create` usage).
 - Stat-walks from `PATH` (default `$HOME`), skips `.git` and descending into matches.
 - For each directory entry matching a watched name, checks `st_ino == 256`.
@@ -170,6 +222,14 @@ Bootstraps `projects.d` entries from subvolumes that already exist (pre-adoption
 - **Default: print-only**, formatted as ready-to-paste TOML. `--save` (explicit opt-in) appends to `projects.d/local.toml`.
 
 ### `ghostvolumes convert <path>`
+
+> **Superseded and substantially generalized** — no longer a
+> single-leaf migration with a hard git-tracked refusal. `<path>` is
+> now a recursive walk-and-resolve with a "remember this?" prompt,
+> project-root registration side effect, and no VCS check anywhere.
+> See `ai-work/tasks/decision-model.plan.md` §6 for the current design;
+> steps 2-4 below (the actual copy-and-swap mechanics) are unchanged.
+
 One-time migration for a pre-existing, populated plain directory:
 1. Refuse outright if `is_git_tracked(path)` — no override.
 2. Create a new subvolume at a temp path.
@@ -183,6 +243,14 @@ One-time migration for a pre-existing, populated plain directory:
 `cargo install` only installs `[[bin]]` targets — it does not install or place `cdylib`/`.so` artifacts anywhere, and there's no postinstall hook (unlike apt/Homebrew). Two consequences shape the packaging design, plus a related one about config parsing:
 
 ### 8.0 The shim can't parse TOML — compile config down to a flat cache instead
+
+> **Partially superseded:** `compiled.tsv`'s row format reverted to
+> plain `(prefix, name)` — the "proactive" third column and
+> per-project rows described below no longer exist, since there's no
+> proactive/cd-hook path or per-project config left to mark rows for
+> (`ai-work/tasks/decision-model.plan.md` §7). Everything else in this
+> section (root-keyed global-default rows, validate-at-compile-time,
+> the shim's plain `str::split('\t')` reader) is unchanged.
 
 Bare `rustc` has no dependency resolution, so the shim can't pull in `toml`/`serde` (or their transitive dependency chains) the way the main CLI can. Rather than hand-vendoring a parser chain, split the responsibility cleanly: **only the CLI binary — a normal `cargo`-built target with full crate access — ever parses TOML.** It resolves and merges `roots.d/*` + `watched.d/*` + `projects.d/*` per §2 and §4, then compiles the result down into a flat, trivially-parseable cache the shim reads at each process startup:
 
@@ -221,10 +289,10 @@ Building the shim as a separate `cdylib` crate and hoping `cargo install` distri
 
 Keep the shim's entry point (`shim/preload.rs`) as a small, **crate-dependency-free** file: no `extern crate`/`use` of anything from crates.io. "Dependency-free" specifically means no crates.io crates — it does *not* mean no `std`. Bare `rustc` links `std` automatically regardless of Cargo, since `std` ships pre-compiled with the toolchain rather than being resolved from a registry; the constraint that actually forces hand-declared `extern "C"` blocks is that bare `rustc` (invoked directly, bypassing `cargo build`) has no Cargo.lock and thus no way to locate/link a crates.io crate's compiled `.rlib` — a constraint `std` is simply exempt from. So the shim uses `std::process::Command`, `std::fs`, `std::env::current_dir()`, etc. freely for anything with a normal std equivalent, and hand-declares `extern "C"` only for the handful of things `std` has no wrapper for at all: `dlsym` (for `RTLD_NEXT` symbol resolution), `ioctl` (for `BTRFS_IOC_SUBVOL_CREATE`), and the exported `mkdir`/`mkdirat` replacement symbols themselves (which the dynamic linker resolves calls to — these have to be raw C-ABI exports by definition, not something `std` could provide).
 
-**Shared logic lives in dependency-free files, included by both sides — not duplicated.** Several pieces of logic are needed by both the main CLI and the shim: `compiled.tsv` parsing/matching (§8.0), the git-tracked gate (§4), and the BTRFS subvolume primitives (inode-256 check, `BTRFS_IOC_SUBVOL_CREATE`). Where that logic has zero crate dependencies already (as written, `is_git_tracked` and the flat-cache `parse`/`names_for` functions only ever touched plain `std` types), it lives in a file under `shim/` and gets pulled into the main crate's normal module tree via `include!("../shim/whatever.rs")` — a textual splice, not a separate compilation — so both sides compile the literal same source rather than two independently-written implementations that only an equivalence test proves match. Only the BTRFS ioctl wrapper needs adjustment: the main-crate version returns `anyhow::Result` for its own error-handling convenience, but the shared core (as included by the shim) is written against plain `std::io::Result`, with the main crate's `anyhow`-based call sites absorbing that via `?`'s automatic `From` conversion. `#[cfg(test)]` module blocks inside a shared file are compiled by `cargo test` (main crate) but automatically skipped by the shim's plain `rustc` invocation (which never passes `--cfg test`), so test code can stay right alongside the shared logic in one file with no extra separation needed. This is a plain `mod`/`include!` mechanism — a rustc-native, filesystem-based feature that needs no dependency resolution, unlike `extern crate`.
+**Shared logic lives in dependency-free files, included by both sides — not duplicated.** Several pieces of logic are needed by both the main CLI and the shim: `compiled.tsv` parsing/matching (§8.0), decision-file parsing/resolution and the project-roots list (`ai-work/tasks/decision-model.plan.md` §2-§3, superseding the original git-tracked gate this paragraph once pointed to), and the BTRFS subvolume primitives (inode-256 check, `BTRFS_IOC_SUBVOL_CREATE`). Where that logic has zero crate dependencies already (as written, the decision/project-roots parsers and the flat-cache `parse`/`names_for` functions only ever touch plain `std` types), it lives in a file under `shim/` and gets pulled into the main crate's normal module tree via `include!("../shim/whatever.rs")` — a textual splice, not a separate compilation — so both sides compile the literal same source rather than two independently-written implementations that only an equivalence test proves match. Only the BTRFS ioctl wrapper needs adjustment: the main-crate version returns `anyhow::Result` for its own error-handling convenience, but the shared core (as included by the shim) is written against plain `std::io::Result`, with the main crate's `anyhow`-based call sites absorbing that via `?`'s automatic `From` conversion. `#[cfg(test)]` module blocks inside a shared file are compiled by `cargo test` (main crate) but automatically skipped by the shim's plain `rustc` invocation (which never passes `--cfg test`), so test code can stay right alongside the shared logic in one file with no extra separation needed. This is a plain `mod`/`include!` mechanism — a rustc-native, filesystem-based feature that needs no dependency resolution, unlike `extern crate`.
 
 **Compile it at build time, not at runtime `init`.** `cargo install` already does a full local compile of `ghostvolumes` on the machine it'll run on — a `rustc` toolchain is by definition present at that moment, since it's what's compiling `ghostvolumes` itself. So `build.rs`:
-1. Shells out to `rustc --edition 2021 --crate-type cdylib -O -C panic=abort --target $TARGET -o $OUT_DIR/preload.so <manifest-dir>/shim/preload.rs` (`$TARGET` read from the `TARGET` env var Cargo sets for build scripts, so the shim always matches whatever triple the main binary is being built for — a no-op passthrough for the ordinary same-machine `cargo install` case, but keeps things correct if this crate is ever cross-compiled). No copying into `$OUT_DIR` first — `rustc` reads `shim/preload.rs` directly from the source tree (via `CARGO_MANIFEST_DIR`), and its `mod cache_core;`/`mod git_core;`/`mod btrfs_core;` declarations resolve to the sibling files in `shim/` the same way they would under `cargo build` — module resolution is a compiler feature, not a Cargo one. If `$TARGET` contains `musl`, additionally pass `-C target-feature=-crt-static` — see libc-matching requirement below.
+1. Shells out to `rustc --edition 2021 --crate-type cdylib -O -C panic=abort --target $TARGET -o $OUT_DIR/preload.so <manifest-dir>/shim/preload.rs` (`$TARGET` read from the `TARGET` env var Cargo sets for build scripts, so the shim always matches whatever triple the main binary is being built for — a no-op passthrough for the ordinary same-machine `cargo install` case, but keeps things correct if this crate is ever cross-compiled). No copying into `$OUT_DIR` first — `rustc` reads `shim/preload.rs` directly from the source tree (via `CARGO_MANIFEST_DIR`), and its `mod cache_core;`/`mod decision_core;`/`mod project_roots_core;`/`mod btrfs_core;` declarations resolve to the sibling files in `shim/` the same way they would under `cargo build` — module resolution is a compiler feature, not a Cargo one. If `$TARGET` contains `musl`, additionally pass `-C target-feature=-crt-static` — see libc-matching requirement below.
 2. `main.rs` embeds the result as a byte blob: `include_bytes!(concat!(env!("OUT_DIR"), "/preload.so"))`.
 
 **Not compatible with `cargo binstall`.** A prebuilt-binary installer like `cargo binstall` downloads a binary built once by the maintainer's CI and never runs `build.rs` on the end user's machine at all — meaning the embedded shim bytes would be compiled against the CI machine's libc, not the end user's, silently reintroducing the exact libc-family/version-matching problem the "build on the target machine via `cargo install`" design exists to avoid for free. GhostVolumes should not publish `cargo binstall`-compatible release artifacts; `cargo install` (build from source) is the only supported installation path for this reason, not merely a default preference.
@@ -248,6 +316,10 @@ For `cargo install`, both axes resolve for free: `build.rs` compiles the shim ri
 Note none of this changes the coverage picture from §5 — a preloaded shared library is still bound by the same dynamic-linker mechanism regardless of implementation language, so statically-linked *host* binaries (the actual build tool being run, e.g. a musl-static `uv`) remain an accepted gap either way.
 
 ### 8.2 Shell integration via `shell-init`, not rc-file editing
+
+> **Superseded:** the `cd`-wrapper/`chpwd` hook bullet below is gone —
+> `shell-init` now emits only the `LD_PRELOAD` export
+> (`ai-work/tasks/decision-model.plan.md` §5, §7).
 
 `cargo install` can't append anything to `.bashrc`/`.zshrc` for you, and silently rewriting a user's rc file is the wrong default regardless. Follow the same pattern as `starship`, `zoxide`, and `direnv` — a subcommand that prints a shell snippet for the user to `eval`:
 
@@ -297,6 +369,12 @@ Consequence: `cargo test` needs a real BTRFS-backed directory to pass at all. `b
 ---
 
 ## 9. Build order
+
+> This is the historical order actually followed to reach the original
+> design (all items below are long since done). Item 7's `ensure`
+> subcommand no longer exists — see `ai-work/tasks/decision-model.plan.md`'s
+> own build order (12 steps) for the redesign that replaced it,
+> also long since complete.
 
 1. TOML config loader with `*.d/` merge logic — underpins everything else.
 2. Config compiler (`reload`) producing `compiled.tsv`, auto-invoked from `scan --save` / `discover --save`.

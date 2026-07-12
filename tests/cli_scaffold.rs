@@ -12,8 +12,9 @@ fn help_lists_all_subcommands() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("discover"))
         .stdout(predicate::str::contains("convert"))
-        .stdout(predicate::str::contains("shell-init"))
-        .stdout(predicate::str::contains("ensure"));
+        .stdout(predicate::str::contains("register"))
+        .stdout(predicate::str::contains("intercept"))
+        .stdout(predicate::str::contains("shell-init"));
 }
 
 #[test]
@@ -24,9 +25,9 @@ fn no_args_fails_with_usage() {
 
 #[test]
 fn unrecognized_subcommand_fails_with_usage() {
-    // Every subcommand is implemented as of Step 14 (ensure) - this
-    // now checks clap's own handling of an invalid subcommand name
-    // rather than "still a stub", which no longer applies to anything.
+    // Every subcommand is fully implemented - this checks clap's own
+    // handling of an invalid subcommand name rather than "still a
+    // stub", which no longer applies to anything.
     let mut cmd = Command::cargo_bin("ghostvolumes").unwrap();
     cmd.arg("frobnicate");
     cmd.assert()

@@ -13,21 +13,21 @@ mod config;
 #[cfg(target_os = "linux")]
 mod convert;
 #[cfg(target_os = "linux")]
+mod decision;
+#[cfg(target_os = "linux")]
 mod discover;
 #[cfg(target_os = "linux")]
-mod ensure;
-#[cfg(target_os = "linux")]
-mod git;
-#[cfg(target_os = "linux")]
 mod init;
+#[cfg(target_os = "linux")]
+mod intercept;
 #[cfg(target_os = "linux")]
 mod merge;
 #[cfg(target_os = "linux")]
 mod mountinfo;
 #[cfg(target_os = "linux")]
-mod pathmatch;
+mod project_roots;
 #[cfg(target_os = "linux")]
-mod registration;
+mod register;
 #[cfg(target_os = "linux")]
 mod reload;
 #[cfg(target_os = "linux")]
@@ -69,7 +69,7 @@ enum Command {
     Reload,
     /// Compile and install the LD_PRELOAD shim, write default config
     Init,
-    /// Find pre-existing subvolumes and suggest projects.d entries
+    /// Find pre-existing subvolumes and suggest decision-file lines
     Discover {
         path: Option<String>,
         #[arg(long)]
@@ -77,12 +77,21 @@ enum Command {
         #[arg(long)]
         save: bool,
     },
-    /// Migrate a pre-existing populated directory into a subvolume
-    Convert { path: String },
+    /// Recursively find and resolve subvolume candidates under path
+    Convert {
+        path: String,
+        #[arg(long)]
+        max_depth: Option<u32>,
+    },
+    /// Register a project-root path for a narrower decision-file walk-up boundary
+    Register { path: String },
+    /// Run <cmd> with the shim preloaded into it (and only it)
+    Intercept {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
     /// Print the shell integration snippet for eval
     ShellInit { shell: String },
-    /// Invoked by the cd-hook on every directory change
-    Ensure { path: String },
 }
 
 #[cfg(target_os = "linux")]
@@ -125,43 +134,62 @@ fn main() -> anyhow::Result<()> {
             };
             let merged = merge::load_all(&config_dir)?;
             let matches = discover::walk(&start, max_depth, &merged.global_defaults);
-            let suggestions = discover::group_and_gate(matches, git::is_git_tracked);
-            let text = discover::format_toml(&suggestions);
+            let suggestions = discover::group_by_parent(matches);
             if save {
-                let projects_local = config_dir.join("projects.d").join("local.toml");
-                std::fs::create_dir_all(projects_local.parent().unwrap())?;
-                use std::io::Write;
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&projects_local)?
-                    .write_all(text.as_bytes())?;
-                let cache_path = xdg::data_dir()?.join("compiled.tsv");
-                reload::reload(&config_dir, &cache_path)?;
+                for s in &suggestions {
+                    let file_path = s.path.join(decision::DECISION_FILE_NAME);
+                    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
+                    let new_lines: Vec<String> = s
+                        .names
+                        .iter()
+                        .map(|name| format!("+ {name}"))
+                        .filter(|line| !existing.lines().any(|l| l.trim() == line))
+                        .collect();
+                    if new_lines.is_empty() {
+                        continue;
+                    }
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&file_path)?;
+                    for line in new_lines {
+                        writeln!(file, "{line}")?;
+                    }
+                }
             } else {
-                print!("{text}");
+                print!("{}", discover::format_decisions(&suggestions));
             }
             Ok(())
         }
-        Command::Convert { path } => convert::convert(&PathBuf::from(path)),
+        Command::Convert { path, max_depth } => {
+            let data_dir = xdg::data_dir()?;
+            let cache_path = data_dir.join("compiled.tsv");
+            let project_roots_path = project_roots::path_in(&data_dir);
+            convert::convert(
+                &PathBuf::from(path),
+                max_depth,
+                &cache_path,
+                &project_roots_path,
+            )
+        }
+        Command::Register { path } => {
+            let list_path = project_roots::path_in(&xdg::data_dir()?);
+            register::register(&list_path, &path)
+        }
+        Command::Intercept { cmd } => {
+            let data_dir = xdg::data_dir()?;
+            let cache_path = data_dir.join("compiled.tsv");
+            let project_roots_path = project_roots::path_in(&data_dir);
+            let preload_so_path = data_dir.join("preload.so");
+            let code =
+                intercept::intercept(&cmd, &preload_so_path, &cache_path, &project_roots_path)?;
+            std::process::exit(code);
+        }
         Command::ShellInit { shell } => {
             let data_dir = xdg::data_dir()?;
             print!("{}", shellinit::shell_init(&shell, &data_dir)?);
             Ok(())
-        }
-        Command::Ensure { path } => {
-            let config_dir = xdg::config_dir()?;
-            let data_dir = xdg::data_dir()?;
-            let cache_path = data_dir.join("compiled.tsv");
-            let session_id = unsafe { libc::getppid() };
-            ensure::ensure(
-                &PathBuf::from(path),
-                &config_dir,
-                &data_dir,
-                &cache_path,
-                &ensure::runtime_dir(),
-                session_id,
-            )
         }
     }
 }

@@ -26,7 +26,8 @@ fn main() {
     for file in [
         "preload.rs",
         "cache_core.rs",
-        "git_core.rs",
+        "decision_core.rs",
+        "project_roots_core.rs",
         "btrfs_core.rs",
         "xdg_core.rs",
     ] {

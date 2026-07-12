@@ -1,20 +1,19 @@
-//! Loads and merges `*.d/` config directories per plan §2:
-//! `roots.d` / `watched.d` are simple sets (union + dedupe, no
-//! precedence), `projects.d` is a concatenated list of `[[project]]`
-//! entries keyed by path (last file wins on a duplicate path, since
-//! files load in lexical order and a hand-edited later file is
-//! assumed to be the deliberate override).
+//! Loads and merges `*.d/` config directories per plan §2: `roots.d` /
+//! `watched.d` are simple sets (union + dedupe, no precedence).
+//! `projects.d` (per-project config) was removed along with `ensure`
+//! and per-project `.ghostvolumes.toml` entirely
+//! (ai-work/tasks/decision-model.plan.md §7) — decision files are the
+//! entire per-project mechanism now.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::config::{self, ProjectEntry};
+use crate::config;
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct MergedConfig {
     pub roots: Vec<String>,
     pub global_defaults: Vec<String>,
-    pub projects: Vec<ProjectEntry>,
 }
 
 /// Lexically-sorted list of `*.toml` files directly inside `dir`.
@@ -53,25 +52,12 @@ fn load_watched_dir(dir: &Path) -> anyhow::Result<Vec<String>> {
     Ok(set.into_iter().collect())
 }
 
-fn load_projects_dir(dir: &Path) -> anyhow::Result<Vec<ProjectEntry>> {
-    let mut by_path = std::collections::BTreeMap::new();
-    for file in list_toml_files(dir)? {
-        let text = std::fs::read_to_string(&file)?;
-        let parsed = config::parse_projects(&text)?;
-        for entry in parsed.project {
-            by_path.insert(entry.path.clone(), entry);
-        }
-    }
-    Ok(by_path.into_values().collect())
-}
-
-/// Loads `roots.d/`, `watched.d/`, `projects.d/` under `config_dir`
-/// (e.g. `~/.config/ghostvolumes`) and merges each per the rules above.
+/// Loads `roots.d/` and `watched.d/` under `config_dir` (e.g.
+/// `~/.config/ghostvolumes`) and merges each per the rules above.
 pub fn load_all(config_dir: &Path) -> anyhow::Result<MergedConfig> {
     Ok(MergedConfig {
         roots: load_roots_dir(&config_dir.join("roots.d"))?,
         global_defaults: load_watched_dir(&config_dir.join("watched.d"))?,
-        projects: load_projects_dir(&config_dir.join("projects.d"))?,
     })
 }
 
@@ -118,71 +104,11 @@ mod tests {
     }
 
     #[test]
-    fn projects_concatenate_across_files() {
-        let dir = tempdir().unwrap();
-        let projects_d = dir.path().join("projects.d");
-        fs::create_dir(&projects_d).unwrap();
-        write(
-            &projects_d,
-            "a.toml",
-            r#"
-                [[project]]
-                path = "/home/user1/projects/a"
-                proactive = ["target"]
-            "#,
-        );
-        write(
-            &projects_d,
-            "b.toml",
-            r#"
-                [[project]]
-                path = "/home/user1/projects/b"
-                watch = ["dist"]
-            "#,
-        );
-
-        let merged = load_projects_dir(&projects_d).unwrap();
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].path, "/home/user1/projects/a");
-        assert_eq!(merged[1].path, "/home/user1/projects/b");
-    }
-
-    #[test]
-    fn duplicate_project_path_last_file_wins() {
-        let dir = tempdir().unwrap();
-        let projects_d = dir.path().join("projects.d");
-        fs::create_dir(&projects_d).unwrap();
-        write(
-            &projects_d,
-            "00-first.toml",
-            r#"
-                [[project]]
-                path = "/home/user1/projects/a"
-                proactive = ["target"]
-            "#,
-        );
-        write(
-            &projects_d,
-            "10-override.toml",
-            r#"
-                [[project]]
-                path = "/home/user1/projects/a"
-                proactive = ["node_modules"]
-            "#,
-        );
-
-        let merged = load_projects_dir(&projects_d).unwrap();
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].proactive, vec!["node_modules"]);
-    }
-
-    #[test]
     fn missing_dir_yields_empty_not_error() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.d");
         assert!(load_roots_dir(&missing).unwrap().is_empty());
         assert!(load_watched_dir(&missing).unwrap().is_empty());
-        assert!(load_projects_dir(&missing).unwrap().is_empty());
     }
 
     #[test]
@@ -198,10 +124,10 @@ mod tests {
     }
 
     #[test]
-    fn load_all_combines_all_three_dirs() {
+    fn load_all_combines_both_dirs() {
         let dir = tempdir().unwrap();
         let config_dir = dir.path();
-        for sub in ["roots.d", "watched.d", "projects.d"] {
+        for sub in ["roots.d", "watched.d"] {
             fs::create_dir(config_dir.join(sub)).unwrap();
         }
         write(
@@ -214,19 +140,9 @@ mod tests {
             "00-defaults.toml",
             r#"names = ["node_modules"]"#,
         );
-        write(
-            &config_dir.join("projects.d"),
-            "local.toml",
-            r#"
-                [[project]]
-                path = "/home/user1/projects/big-frontend"
-                proactive = ["node_modules"]
-            "#,
-        );
 
         let merged = load_all(config_dir).unwrap();
         assert_eq!(merged.roots, vec!["/"]);
         assert_eq!(merged.global_defaults, vec!["node_modules"]);
-        assert_eq!(merged.projects.len(), 1);
     }
 }

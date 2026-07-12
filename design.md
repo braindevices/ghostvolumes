@@ -1,18 +1,27 @@
 # GhostVolumes — Design Decisions
 
 Why this project is built the way it is. Full detail lives in
-`ai-work/tasks/main-plan.md`; this is the distilled version for anyone
-who doesn't want to read that whole doc first. When the two disagree,
-`main-plan.md` is authoritative — update this file to match.
+`ai-work/tasks/main-plan.md` (original design) and
+`ai-work/tasks/decision-model.plan.md` (supersedes main-plan.md's
+git-tracked gate, cd-hook, and per-project `.ghostvolumes.toml`/
+`projects.d` — read that doc for the current approve/deny model). This
+file is the distilled, kept-current version for anyone who doesn't
+want to read either whole doc first. When these disagree,
+decision-model.plan.md wins for anything it covers, main-plan.md
+otherwise — update this file to match.
 
 ## What it does
 
 Auto-converts volatile, high-churn directories (`node_modules`,
 `target`, build caches, etc.) into their own BTRFS subvolumes, so
 snapshot tools (Snapper, etc.) don't waste snapshots snapshotting
-disposable build artifacts. Two enforcement paths: an `LD_PRELOAD` hook
-(reactive — catches `mkdir` wherever it happens) and a `cd`-hook
-(proactive — pre-creates known project directories on `cd`).
+disposable build artifacts. One reactive enforcement path — an
+`LD_PRELOAD` hook, loaded into a build via
+`ghostvolumes intercept -- <cmd>`, that catches `mkdir` wherever it
+happens — plus `ghostvolumes convert <path>` for migrating
+already-populated directories (or bootstrapping a brand-new project's
+first decisions) explicitly. There is no proactive/pre-creation path
+anymore — see "Decision files" below for why, and what replaced it.
 
 ## Non-goals (explicit, not just unfinished)
 
@@ -52,10 +61,36 @@ Only things with no `std` equivalent (`dlsym`, the raw
 are hand-declared `extern "C"`.
 
 **Shared logic lives once, under `shim/`, spliced into both sides.**
-`cache_core.rs` / `git_core.rs` / `btrfs_core.rs` / `xdg_core.rs` are
-`include!()`d into the main crate and `mod`-included into the shim —
-one literal source, not two hand-synced copies that only an
-equivalence test would catch drifting apart.
+`cache_core.rs` / `decision_core.rs` / `project_roots_core.rs` /
+`btrfs_core.rs` / `xdg_core.rs` are `include!()`d into the main crate
+and `mod`-included into the shim — one literal source, not two
+hand-synced copies that only an equivalence test would catch drifting
+apart.
+
+**No VCS detection anywhere — an explicit, recorded human decision is
+the only safety net.** The original design's "git-tracked gate"
+(`is_git_tracked`, shelling out to `git ls-files`) only ever protected
+git repos, leaned on a fragile external process for a
+correctness-relevant check, and made the two failure modes
+asymmetric: skipping a conversion costs an optimization, wrongly
+converting something loses snapshot coverage for its contents (real
+data-loss risk on restore). Replaced entirely
+(`ai-work/tasks/decision-model.plan.md`) by gitignore-style decision
+files (`.ghostvolumes-decisions`, one per directory, `+`/`-` patterns,
+closest-enclosing-file-with-a-match wins) that the shim resolves live
+on every intercepted call — no compilation, no caching across calls,
+just a handful of `stat()`/`open()`s bounded by the nearest registered
+project-root boundary. A candidate with no decision anywhere is
+**skipped by default**, not converted — the tool's original
+fully-automatic default is now opt-in only, via `GHOSTVOLUMES_AUTO_YES`
+(documented as not recommended, since it gives up the whole
+transparency guarantee). The shim itself never decides anything and
+never prompts (it can be injected into arbitrary subprocess trees with
+no TTY guarantee) — it only ever appends an inert `# <pattern>` comment
+noting an undecided candidate, which a human turns into a real `+`/`-`
+line by hand. `ghostvolumes convert <path>` is the one place actual
+prompting happens, since it's an explicit, deliberate, human-run CLI
+command with no such constraint.
 
 **Config: only the CLI parses TOML; the shim reads a flat, root-keyed
 TSV cache (`compiled.tsv`) instead.**
@@ -112,10 +147,16 @@ fails) wherever mount privilege isn't available.
   intercepts those two symbols. Harmless: nothing needs to happen for
   an already-existing subvolume anyway. (Full investigation:
   `ai-work/tasks/ci-debug-log-test.plan.md`.)
-- Non-interactive shells (CI runners, `bash -c`) don't source rc files,
-  so they only get LD_PRELOAD's reactive coverage, not the cd-hook's
-  proactive one, unless `LD_PRELOAD` is exported globally (e.g.
-  `/etc/environment`).
+- **A totally fresh project with no decision file at all gets zero
+  benefit from `intercept` on its first build** — every candidate is
+  undecided, so the shim can only skip-and-comment, nothing to
+  actually convert yet. Accepted as a direct, correct consequence of
+  "nothing gets decided without a prior decision existing somewhere,"
+  not a gap: `ghostvolumes convert <project-root>` once (or hand-
+  authoring decision-file rules ahead of time) is what populates the
+  first decisions; `intercept` earns its keep starting with the next
+  build, and any subsequent clone/pull of a repo with a committed
+  decision file benefits immediately.
 - CI's `ubuntu-26.04` and `snapper-interop` legs run
   `continue-on-error: true` (a preview runner image, and an
   as-yet-long-term-unproven interop job, respectively) — not required
@@ -123,12 +164,15 @@ fails) wherever mount privilege isn't available.
 
 ## Gotchas for contributors
 
-- **Any subprocess the shim spawns internally must strip `LD_PRELOAD`
-  from its own environment** (`.env_remove("LD_PRELOAD")`). Child
-  processes inherit it by default; without stripping it, the shim's own
-  internal `git ls-files` check (or any future internal subprocess call)
-  recursively reloads the shim into itself — wasteful, and potentially
-  dangerous if that subprocess ever creates a directory of its own.
+- **The shim itself never spawns a subprocess** — it only ever reads
+  plain files (`compiled.tsv`, the project-roots list, decision files)
+  and writes plain files (the log, pending-comment appends). This was
+  a deliberate simplification of the original git-tracked gate design
+  (which shelled out to `git ls-files`, needing careful
+  `LD_PRELOAD`-stripping to avoid recursively reloading the shim into
+  its own subprocess) — if any future change ever needs the shim to
+  spawn a subprocess again, that same `.env_remove("LD_PRELOAD")`
+  discipline would need to come back with it.
 - **Never assume a specific `mkdir`/`mkdirat` call pattern from the
   system's `mkdir` binary in tests** — it varies by what `coreutils`
   package is installed (see the accepted gap above). Prefer asserting

@@ -7,12 +7,12 @@
 // `src/cache.rs`, since it needs `MergedConfig` (serde-derived) — the
 // shim never writes this file, only reads it.
 //
-// Rows are `(prefix, name, is_proactive)`. The third column exists
-// because the shim's reactive matching (`names_for`) needs the full
-// `watch ∪ proactive` union, but `ensure`'s proactive matching
-// (`proactive_project_for`) needs *only* the `proactive` subset, never
-// `watch`-only names (§4) — that distinction can't be recovered from
-// an undifferentiated union, a row has to carry it explicitly.
+// Rows are `(prefix, name)`. Plain two-column format: the "proactive"
+// third column that used to exist here was removed along with `ensure`
+// and per-project `.ghostvolumes.toml`/`projects.d`
+// (ai-work/tasks/decision-model.plan.md §7) — decision files are the
+// entire per-project mechanism now, and `compiled.tsv` only ever needs
+// to answer "which names are watched under which root."
 //
 // Plain `//` comments, not `//!`/`///` doc comments: this file gets
 // spliced mid-file into src/cache.rs via `include!`, where an inner
@@ -27,66 +27,53 @@
 // see anything the includer imported) - qualifying every path keeps
 // both contexts unambiguous without duplicate-import errors.
 
-/// Parses `compiled.tsv` text back into `(prefix, name, is_proactive)`
-/// triples — `str::split('\t')` per line, no external crate. A row's
-/// optional third field is `is_proactive` iff it's literally
-/// `"proactive"`; two-column rows (global-default and `watch`-only
-/// rows) default to `false`.
-pub fn parse(text: &str) -> Vec<(String, String, bool)> {
+/// Parses `compiled.tsv` text back into `(prefix, name)` pairs —
+/// `str::split_once('\t')` per line, no external crate.
+pub fn parse(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
-            let prefix = parts.next()?;
-            let name = parts.next()?;
-            let is_proactive = parts.next() == Some("proactive");
-            Some((prefix.to_string(), name.to_string(), is_proactive))
+            let (prefix, name) = line.split_once('\t')?;
+            Some((prefix.to_string(), name.to_string()))
         })
         .collect()
 }
 
 /// The names that apply to `path`: the union of every row whose
-/// prefix is an ancestor-or-self of `path`, regardless of the
-/// `is_proactive` marker. This is the shim's reactive matching logic —
-/// it doesn't care which names are also proactive. Dead code from the
-/// main crate's own production-code perspective (only its tests and
-/// the shim's separate `mod`-based compilation call it) — allowed
-/// rather than removed, since it's very much alive there.
+/// prefix is an ancestor-or-self of `path`. This is the shim's
+/// reactive matching logic. Dead code from the main crate's own
+/// production-code perspective (only its tests and the shim's separate
+/// `mod`-based compilation call it) — allowed rather than removed,
+/// since it's very much alive there.
 #[allow(dead_code)]
-pub fn names_for(
-    rows: &[(String, String, bool)],
-    path: &std::path::Path,
-) -> std::collections::BTreeSet<String> {
+pub fn names_for(rows: &[(String, String)], path: &std::path::Path) -> std::collections::BTreeSet<String> {
     rows.iter()
-        .filter(|(prefix, _, _)| path.starts_with(std::path::Path::new(prefix)))
-        .map(|(_, name, _)| name.clone())
+        .filter(|(prefix, _)| path.starts_with(std::path::Path::new(prefix)))
+        .map(|(_, name)| name.clone())
         .collect()
 }
 
-/// The proactive project (if any) whose root is the longest
-/// ancestor-or-self of `path`, and its proactive names — used by
-/// `ensure` (§6), which needs both *where* to create a name (the
-/// project root, not `path` itself, which may be nested deeper) and
-/// *which* names (only ones marked `proactive`, never `watch`-only,
-/// per §4). Longest-prefix-wins matches `pathmatch::resolve_watch_names`'s
-/// tie-break for nested project entries.
-pub fn proactive_project_for(
-    rows: &[(String, String, bool)],
-    path: &std::path::Path,
-) -> Option<(String, std::collections::BTreeSet<String>)> {
-    let project_root = rows
-        .iter()
-        .filter(|(prefix, _, is_proactive)| {
-            *is_proactive && path.starts_with(std::path::Path::new(prefix))
-        })
-        .map(|(prefix, _, _)| prefix.as_str())
-        .max_by_key(|p| p.len())?
-        .to_string();
-    let names = rows
-        .iter()
-        .filter(|(prefix, _, is_proactive)| *is_proactive && *prefix == project_root)
-        .map(|(_, name, _)| name.clone())
-        .collect();
-    Some((project_root, names))
+/// The longest (most specific) row prefix that is an ancestor-or-self
+/// of `path` — the decision-file walk-up's stopping boundary
+/// (ai-work/tasks/decision-model.plan.md §3). Rows mix broad
+/// `roots.d`-derived entries with narrower registered project-root
+/// entries; using the longest match rather than just any match means
+/// the walk-up stops at the nearest boundary instead of a broader,
+/// possibly-shared one further out. `None` if `path` isn't under any
+/// row's prefix at all (the existing root/name filter already
+/// rejected it before this ever runs).
+///
+/// Wired into `decide()` (`shim/preload.rs`, via `walkup_boundary`) and
+/// into `convert`/`intercept` (CLI-side) - dead code only from the main
+/// crate's own perspective (only its tests and the shim's separate
+/// `mod`-based compilation call it, same as `names_for` above) -
+/// allowed rather than removed.
+#[allow(dead_code)]
+pub fn longest_matching_prefix(rows: &[(String, String)], path: &std::path::Path) -> Option<String> {
+    rows.iter()
+        .map(|(prefix, _)| prefix.as_str())
+        .filter(|prefix| path.starts_with(std::path::Path::new(prefix)))
+        .max_by_key(|prefix| prefix.len())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -101,24 +88,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("/home/user1".to_string(), "node_modules".to_string(), false),
-                ("/data".to_string(), "target".to_string(), false),
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_recognizes_the_proactive_marker() {
-        let rows = parse("/home/user1/app\tnode_modules\tproactive\n/home/user1/app\tdist\n");
-        assert_eq!(
-            rows,
-            vec![
-                (
-                    "/home/user1/app".to_string(),
-                    "node_modules".to_string(),
-                    true
-                ),
-                ("/home/user1/app".to_string(), "dist".to_string(), false),
+                ("/home/user1".to_string(), "node_modules".to_string()),
+                ("/data".to_string(), "target".to_string()),
             ]
         );
     }
@@ -134,95 +105,64 @@ mod tests {
     }
 
     #[test]
-    fn names_for_unions_every_matching_ancestor_row_regardless_of_proactive_marker() {
+    fn names_for_unions_every_matching_ancestor_row() {
         let rows = vec![
-            ("/home/user1".to_string(), "node_modules".to_string(), false),
-            ("/home/user1".to_string(), "target".to_string(), false),
-            (
-                "/home/user1/projects/app".to_string(),
-                "dist".to_string(),
-                true,
-            ),
+            ("/home/user1".to_string(), "node_modules".to_string()),
+            ("/home/user1".to_string(), "target".to_string()),
+            ("/home/user1/projects/app".to_string(), "dist".to_string()),
         ];
         let names = names_for(&rows, Path::new("/home/user1/projects/app/sub"));
         assert_eq!(
             names,
-            BTreeSet::from([
-                "node_modules".to_string(),
-                "target".to_string(),
-                "dist".to_string()
-            ])
+            BTreeSet::from(["node_modules".to_string(), "target".to_string(), "dist".to_string()])
         );
     }
 
     #[test]
     fn names_for_excludes_paths_outside_every_row_prefix() {
-        let rows = vec![(
-            "/home/user1".to_string(),
-            "node_modules".to_string(),
-            false,
-        )];
+        let rows = vec![("/home/user1".to_string(), "node_modules".to_string())];
         assert!(names_for(&rows, Path::new("/etc/somewhere")).is_empty());
     }
 
     #[test]
+    fn longest_matching_prefix_prefers_the_narrower_of_two_ancestor_matches() {
+        let rows = vec![
+            ("/home/user1".to_string(), "node_modules".to_string()),
+            ("/home/user1/projects/app".to_string(), "dist".to_string()),
+        ];
+        let matched = longest_matching_prefix(&rows, Path::new("/home/user1/projects/app/src"));
+        assert_eq!(matched, Some("/home/user1/projects/app".to_string()));
+    }
+
+    #[test]
+    fn longest_matching_prefix_none_when_nothing_matches() {
+        let rows = vec![("/home/user1".to_string(), "node_modules".to_string())];
+        assert_eq!(longest_matching_prefix(&rows, Path::new("/etc/elsewhere")), None);
+    }
+
+    #[test]
+    fn longest_matching_prefix_matches_the_prefix_itself() {
+        let rows = vec![("/home/user1".to_string(), "node_modules".to_string())];
+        assert_eq!(
+            longest_matching_prefix(&rows, Path::new("/home/user1")),
+            Some("/home/user1".to_string())
+        );
+    }
+
+    #[test]
+    fn longest_matching_prefix_respects_component_boundaries() {
+        let rows = vec![("/home/user1/projects/big-frontend".to_string(), "dist".to_string())];
+        assert_eq!(
+            longest_matching_prefix(&rows, Path::new("/home/user1/projects/big-frontend2/sub")),
+            None
+        );
+    }
+
+    #[test]
     fn names_for_respects_component_boundaries_not_string_prefix() {
-        let rows = vec![(
-            "/home/user1/projects/big-frontend".to_string(),
-            "dist".to_string(),
-            false,
-        )];
+        let rows = vec![("/home/user1/projects/big-frontend".to_string(), "dist".to_string())];
         // "big-frontend2" shares a string prefix with "big-frontend"
         // but is not actually under it.
         assert!(names_for(&rows, Path::new("/home/user1/projects/big-frontend2/sub")).is_empty());
-    }
-
-    #[test]
-    fn proactive_project_for_excludes_watch_only_names() {
-        let rows = vec![
-            (
-                "/home/user1/app".to_string(),
-                "node_modules".to_string(),
-                true,
-            ),
-            ("/home/user1/app".to_string(), "dist".to_string(), false),
-        ];
-        let (root, names) = proactive_project_for(&rows, Path::new("/home/user1/app")).unwrap();
-        assert_eq!(root, "/home/user1/app");
-        assert_eq!(names, BTreeSet::from(["node_modules".to_string()]));
-    }
-
-    #[test]
-    fn proactive_project_for_ignores_global_default_rows() {
-        // Global-default (root-keyed) rows are never proactive, even
-        // though they apply reactively everywhere under the root.
-        let rows = vec![(
-            "/home/user1".to_string(),
-            "node_modules".to_string(),
-            false,
-        )];
-        assert!(proactive_project_for(&rows, Path::new("/home/user1/anything")).is_none());
-    }
-
-    #[test]
-    fn proactive_project_for_returns_none_outside_every_row_prefix() {
-        let rows = vec![(
-            "/home/user1/app".to_string(),
-            "node_modules".to_string(),
-            true,
-        )];
-        assert!(proactive_project_for(&rows, Path::new("/etc/elsewhere")).is_none());
-    }
-
-    #[test]
-    fn proactive_project_for_matches_nested_paths_to_the_project_root() {
-        let rows = vec![(
-            "/home/user1/app".to_string(),
-            "node_modules".to_string(),
-            true,
-        )];
-        let (root, _) =
-            proactive_project_for(&rows, Path::new("/home/user1/app/src/deep")).unwrap();
-        assert_eq!(root, "/home/user1/app");
     }
 }

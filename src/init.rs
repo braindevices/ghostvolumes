@@ -13,7 +13,7 @@ pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     std::fs::write(data_dir.join("preload.so"), PRELOAD_SO)?;
 
-    for sub in ["roots.d", "watched.d", "projects.d"] {
+    for sub in ["roots.d", "watched.d"] {
         std::fs::create_dir_all(config_dir.join(sub))?;
     }
     let defaults_path = config_dir.join("watched.d").join("00-defaults.toml");
@@ -50,7 +50,7 @@ mod tests {
 
         init(&config_dir, &data_dir).unwrap();
 
-        for sub in ["roots.d", "watched.d", "projects.d"] {
+        for sub in ["roots.d", "watched.d"] {
             assert!(config_dir.join(sub).is_dir());
         }
     }

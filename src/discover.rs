@@ -1,10 +1,15 @@
-//! `ghostvolumes discover` (§7): bootstraps `projects.d` entries from
-//! subvolumes that already exist (pre-adoption, or manual `btrfs
-//! subvolume create` usage before GhostVolumes was installed).
+//! `ghostvolumes discover` (ai-work/tasks/decision-model.plan.md §7):
+//! finds subvolumes that already exist (pre-adoption, or manual `btrfs
+//! subvolume create` usage before GhostVolumes was installed) and
+//! suggests decision-file lines to record them — `+ name` per matched
+//! name, grouped by the decision file each group belongs in. No
+//! git-tracked gating (VCS detection was dropped entirely — the only
+//! safety net is now an explicit, recorded human decision, same as
+//! everywhere else in this design).
 
 use std::path::{Path, PathBuf};
 
-use crate::btrfs;
+use crate::{btrfs, decision};
 
 pub struct DiscoveredMatch {
     pub parent: PathBuf,
@@ -69,73 +74,43 @@ fn walk_inner(
 
 pub struct ProjectSuggestion {
     pub path: PathBuf,
-    pub proactive: Vec<String>,
-    pub skipped_git_tracked: Vec<String>,
+    pub names: Vec<String>,
 }
 
-/// Groups matches by parent directory and partitions each parent's
-/// names by the git-tracked gate — tracked names are never suggested
-/// as `proactive`, but are annotated rather than silently dropped
-/// (§4's git-tracked gate, applied at the `discover` call site per §7).
-pub fn group_and_gate(
-    matches: Vec<DiscoveredMatch>,
-    is_git_tracked: impl Fn(&Path) -> bool,
-) -> Vec<ProjectSuggestion> {
+/// Groups matches by parent directory — each group is one project's
+/// worth of `+ name` lines to add to that directory's own decision
+/// file.
+pub fn group_by_parent(matches: Vec<DiscoveredMatch>) -> Vec<ProjectSuggestion> {
     let mut by_parent: std::collections::BTreeMap<PathBuf, Vec<String>> = Default::default();
     for m in matches {
         by_parent.entry(m.parent).or_default().push(m.name);
     }
-
     by_parent
         .into_iter()
-        .map(|(parent, names)| {
-            let mut proactive = Vec::new();
-            let mut skipped_git_tracked = Vec::new();
-            for name in names {
-                if is_git_tracked(&parent.join(&name)) {
-                    skipped_git_tracked.push(name);
-                } else {
-                    proactive.push(name);
-                }
-            }
-            proactive.sort();
-            skipped_git_tracked.sort();
+        .map(|(parent, mut names)| {
+            names.sort();
+            names.dedup();
             ProjectSuggestion {
                 path: parent,
-                proactive,
-                skipped_git_tracked,
+                names,
             }
         })
         .collect()
 }
 
-/// Renders suggestions as ready-to-paste TOML matching `projects.d`'s
-/// `[[project]]` shape — a project block only for parents with at
-/// least one surviving (non-git-tracked) name, plus a comment for any
-/// git-tracked names skipped there, so nothing is silently omitted.
-pub fn format_toml(suggestions: &[ProjectSuggestion]) -> String {
+/// Renders suggestions as ready-to-paste decision-file content: one
+/// header comment naming the file to save it as, followed by its
+/// `+ name` lines.
+pub fn format_decisions(suggestions: &[ProjectSuggestion]) -> String {
     let mut out = String::new();
     for s in suggestions {
-        if !s.skipped_git_tracked.is_empty() {
-            out.push_str(&format!(
-                "# skipped (git-tracked): {} in {}\n",
-                s.skipped_git_tracked.join(", "),
-                s.path.display()
-            ));
-        }
-        if s.proactive.is_empty() {
-            continue;
-        }
-        out.push_str("[[project]]\n");
-        out.push_str(&format!("path = {:?}\n", s.path.display().to_string()));
         out.push_str(&format!(
-            "proactive = [{}]\n",
-            s.proactive
-                .iter()
-                .map(|n| format!("{n:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "# {}\n",
+            s.path.join(decision::DECISION_FILE_NAME).display()
         ));
+        for name in &s.names {
+            out.push_str(&format!("+ {name}\n"));
+        }
         out.push('\n');
     }
     out
@@ -215,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn group_and_gate_separates_tracked_from_untracked() {
+    fn group_by_parent_groups_and_dedupes() {
         let matches = vec![
             DiscoveredMatch {
                 parent: PathBuf::from("/p"),
@@ -225,18 +200,21 @@ mod tests {
                 parent: PathBuf::from("/p"),
                 name: "target".to_string(),
             },
+            DiscoveredMatch {
+                parent: PathBuf::from("/p"),
+                name: "target".to_string(),
+            },
         ];
-        let suggestions = group_and_gate(matches, |path| path.ends_with("target"));
+        let suggestions = group_by_parent(matches);
         assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].proactive, vec!["node_modules".to_string()]);
         assert_eq!(
-            suggestions[0].skipped_git_tracked,
-            vec!["target".to_string()]
+            suggestions[0].names,
+            vec!["node_modules".to_string(), "target".to_string()]
         );
     }
 
     #[test]
-    fn group_and_gate_groups_by_parent() {
+    fn group_by_parent_separates_distinct_parents() {
         let matches = vec![
             DiscoveredMatch {
                 parent: PathBuf::from("/a"),
@@ -247,53 +225,19 @@ mod tests {
                 name: "node_modules".to_string(),
             },
         ];
-        let suggestions = group_and_gate(matches, |_| false);
+        let suggestions = group_by_parent(matches);
         assert_eq!(suggestions.len(), 2);
     }
 
     #[test]
-    fn format_toml_emits_parseable_project_blocks() {
+    fn format_decisions_emits_a_header_and_plus_lines() {
         let suggestions = vec![ProjectSuggestion {
             path: PathBuf::from("/home/user1/projects/big-frontend"),
-            proactive: vec!["node_modules".to_string()],
-            skipped_git_tracked: vec![],
+            names: vec!["node_modules".to_string(), "target".to_string()],
         }];
-        let text = format_toml(&suggestions);
-        let parsed = crate::config::parse_projects(&text).unwrap();
-        assert_eq!(parsed.project.len(), 1);
-        assert_eq!(parsed.project[0].path, "/home/user1/projects/big-frontend");
-        assert_eq!(
-            parsed.project[0].proactive,
-            vec!["node_modules".to_string()]
-        );
-    }
-
-    #[test]
-    fn format_toml_annotates_skipped_names_without_emitting_them_as_proactive() {
-        let suggestions = vec![ProjectSuggestion {
-            path: PathBuf::from("/home/user1/projects/x"),
-            proactive: vec![],
-            skipped_git_tracked: vec!["vendor".to_string()],
-        }];
-        let text = format_toml(&suggestions);
-        assert!(text.contains("skipped"));
-        assert!(text.contains("vendor"));
-        assert!(!text.contains("[[project]]")); // nothing left to suggest
-    }
-
-    #[test]
-    fn format_toml_mixes_active_and_skipped_for_same_parent() {
-        let suggestions = vec![ProjectSuggestion {
-            path: PathBuf::from("/home/user1/projects/x"),
-            proactive: vec!["node_modules".to_string()],
-            skipped_git_tracked: vec!["vendor".to_string()],
-        }];
-        let text = format_toml(&suggestions);
-        assert!(text.contains("skipped (git-tracked): vendor"));
-        let parsed = crate::config::parse_projects(&text).unwrap();
-        assert_eq!(
-            parsed.project[0].proactive,
-            vec!["node_modules".to_string()]
-        );
+        let text = format_decisions(&suggestions);
+        assert!(text.contains("# /home/user1/projects/big-frontend/.ghostvolumes-decisions\n"));
+        assert!(text.contains("+ node_modules\n"));
+        assert!(text.contains("+ target\n"));
     }
 }

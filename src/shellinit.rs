@@ -1,14 +1,20 @@
 //! `ghostvolumes shell-init <shell>` (§8.2): prints a shell snippet for
 //! the user to `eval`, following the same pattern as `starship`,
-//! `zoxide`, `direnv` — never edits rc files directly.
+//! `zoxide`, `direnv` — never edits rc files directly. Only the
+//! `LD_PRELOAD` export remains — no `cd` wrapper/`chpwd` hook: `ensure`
+//! (cd-hook) was removed entirely
+//! (ai-work/tasks/decision-model.plan.md §5/§7). Its old
+//! responsibilities (proactive pre-creation, repo-local-config
+//! registration, plain-directory warnings) all have homes elsewhere now
+//! — see `convert` (§6) and `intercept` (§5).
 
 use std::path::Path;
 
 pub fn shell_init(shell: &str, data_dir: &Path) -> anyhow::Result<String> {
     let so_path = data_dir.join("preload.so");
     match shell {
-        "bash" => Ok(bash_snippet(&so_path)),
-        "zsh" => Ok(zsh_snippet(&so_path)),
+        "bash" => Ok(ld_preload_export(&so_path)),
+        "zsh" => Ok(ld_preload_export(&so_path)),
         other => anyhow::bail!("unsupported shell: {other} (supported: bash, zsh)"),
     }
 }
@@ -19,20 +25,6 @@ fn ld_preload_export(so_path: &Path) -> String {
     format!(
         "export LD_PRELOAD=\"${{LD_PRELOAD:+$LD_PRELOAD:}}{}\"\n",
         so_path.display()
-    )
-}
-
-fn bash_snippet(so_path: &Path) -> String {
-    format!(
-        "{}\ncd() {{\n    builtin cd \"$@\" && command ghostvolumes ensure \"$PWD\"\n}}\n",
-        ld_preload_export(so_path)
-    )
-}
-
-fn zsh_snippet(so_path: &Path) -> String {
-    format!(
-        "{}\nautoload -Uz add-zsh-hook\nghostvolumes_chpwd() {{\n    command ghostvolumes ensure \"$PWD\"\n}}\nadd-zsh-hook chpwd ghostvolumes_chpwd\n",
-        ld_preload_export(so_path)
     )
 }
 
@@ -56,22 +48,6 @@ mod tests {
     fn bash_snippet_appends_to_existing_ld_preload_rather_than_clobbering() {
         let text = shell_init("bash", &data_dir()).unwrap();
         assert!(text.contains("${LD_PRELOAD:+$LD_PRELOAD:}"));
-    }
-
-    #[test]
-    fn bash_snippet_defines_a_cd_function_calling_ensure() {
-        let text = shell_init("bash", &data_dir()).unwrap();
-        assert!(text.contains("cd() {"));
-        assert!(text.contains("builtin cd"));
-        assert!(text.contains("ghostvolumes ensure \"$PWD\""));
-    }
-
-    #[test]
-    fn zsh_snippet_uses_chpwd_hook_not_a_cd_function() {
-        let text = shell_init("zsh", &data_dir()).unwrap();
-        assert!(text.contains("add-zsh-hook chpwd"));
-        assert!(text.contains("ghostvolumes ensure \"$PWD\""));
-        assert!(!text.contains("cd() {"));
     }
 
     #[test]

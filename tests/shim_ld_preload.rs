@@ -125,6 +125,16 @@ fn write_cache(data_home: &Path, rows: &[(&Path, &str)]) {
     std::fs::write(data_home.join("ghostvolumes/compiled.tsv"), text).unwrap();
 }
 
+/// Writes a decision file (ai-work/tasks/decision-model.plan.md §1) at
+/// `project_root/.ghostvolumes-decisions` - the shim's replacement for
+/// the old git-tracked gate. Most of these tests use `project_root ==
+/// scratch.path()`, matching `write_cache`'s row prefix, since that's
+/// also the walk-up boundary the shim resolves to when nothing's
+/// registered in the (absent, in these tests) project-roots list.
+fn write_decision(project_root: &Path, text: &str) {
+    std::fs::write(project_root.join(".ghostvolumes-decisions"), text).unwrap();
+}
+
 fn run_mkdir_with_shim(data_home: &Path, target: &Path) -> std::process::ExitStatus {
     Command::new("mkdir")
         .arg(target)
@@ -143,10 +153,11 @@ fn is_subvolume(path: &Path) -> bool {
 }
 
 #[test]
-fn matching_name_under_configured_root_becomes_a_subvolume() {
+fn matching_name_with_an_accept_decision_becomes_a_subvolume() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap(); // plain text file, no BTRFS needed
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "+ node_modules\n");
 
     let target = scratch.path().join("node_modules");
     assert!(run_mkdir_with_shim(data_home.path(), &target).success());
@@ -185,6 +196,7 @@ fn relative_path_resolves_via_cwd() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "target")]);
+    write_decision(scratch.path(), "+ target\n");
 
     let status = Command::new("mkdir")
         .arg("target")
@@ -203,6 +215,7 @@ fn mkdirat_with_a_real_dirfd_resolves_correctly() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), ".venv")]);
+    write_decision(scratch.path(), "+ .venv\n");
 
     let status = Command::new(compiled_mkdirat_probe())
         .arg(scratch.path())
@@ -217,46 +230,125 @@ fn mkdirat_with_a_real_dirfd_resolves_correctly() {
 }
 
 #[test]
-fn git_tracked_path_is_never_converted() {
+fn denied_decision_is_never_converted() {
     let scratch = btrfs_scratch_dir();
-    let repo = scratch.path().join("repo");
-    std::fs::create_dir_all(repo.join("vendor")).unwrap();
-    std::fs::write(repo.join("vendor/keep.txt"), b"keep").unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "vendor/keep.txt"],
-        vec![
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "init",
-        ],
-    ] {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-    std::fs::remove_dir_all(repo.join("vendor")).unwrap(); // gone from disk, still tracked
-
     let data_home = tempfile::tempdir().unwrap();
-    write_cache(data_home.path(), &[(repo.as_path(), "vendor")]);
+    write_cache(data_home.path(), &[(scratch.path(), "vendor")]);
+    write_decision(scratch.path(), "- vendor\n");
 
-    let target = repo.join("vendor");
+    let target = scratch.path().join("vendor");
     assert!(run_mkdir_with_shim(data_home.path(), &target).success());
     assert!(
         !is_subvolume(&target),
-        "git-tracked path must never become a subvolume"
+        "a `-` decision must never become a subvolume"
     );
+}
+
+#[test]
+fn undecided_candidate_stays_plain_and_logs_an_always_on_notice() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    // No decision file at all - nothing to resolve against.
+    let log_file = tempfile::NamedTempFile::new().unwrap();
+
+    let target = scratch.path().join("node_modules");
+    let status = Command::new("mkdir")
+        .arg(&target)
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("GHOSTVOLUMES_LOG_FILE", log_file.path())
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!is_subvolume(&target), "undecided must never convert");
+
+    // Undecided is logged even without GHOSTVOLUMES_DEBUG (plan §4):
+    // it's the one signal a human has that a decision is waiting.
+    let log_text = std::fs::read_to_string(log_file.path()).unwrap();
+    assert!(log_text.contains("undecided"), "log:\n{log_text}");
+}
+
+#[test]
+fn undecided_candidate_appends_a_pending_comment_to_the_project_decision_file() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+
+    let target = scratch.path().join("node_modules");
+    assert!(run_mkdir_with_shim(data_home.path(), &target).success());
+    assert!(!is_subvolume(&target));
+
+    let decision_text =
+        std::fs::read_to_string(scratch.path().join(".ghostvolumes-decisions")).unwrap();
+    assert_eq!(decision_text, "# /node_modules\n");
+}
+
+#[test]
+fn undecided_candidate_does_not_duplicate_the_pending_comment_on_repeat_runs() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+
+    let target = scratch.path().join("node_modules");
+    run_mkdir_with_shim(data_home.path(), &target); // creates the plain dir
+    run_mkdir_with_shim(data_home.path(), &target); // EEXIST at the OS level, but decide() still runs
+
+    let decision_text =
+        std::fs::read_to_string(scratch.path().join(".ghostvolumes-decisions")).unwrap();
+    assert_eq!(
+        decision_text.lines().count(),
+        1,
+        "decision file:\n{decision_text}"
+    );
+}
+
+#[test]
+fn ghostvolumes_auto_yes_bypasses_the_decision_lookup_entirely() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    // No decision file at all - would be undecided (skip) without
+    // GHOSTVOLUMES_AUTO_YES.
+
+    let target = scratch.path().join("node_modules");
+    let status = Command::new("mkdir")
+        .arg(&target)
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("GHOSTVOLUMES_AUTO_YES", "1")
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        is_subvolume(&target),
+        "GHOSTVOLUMES_AUTO_YES must bypass undecided-skip"
+    );
+
+    // Nothing gets recorded - the env var itself is the standing
+    // approval, not a decision file entry.
+    assert!(!scratch.path().join(".ghostvolumes-decisions").exists());
+}
+
+#[test]
+fn ghostvolumes_auto_yes_zero_does_not_bypass_the_lookup() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+
+    let target = scratch.path().join("node_modules");
+    let status = Command::new("mkdir")
+        .arg(&target)
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("GHOSTVOLUMES_AUTO_YES", "0")
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!is_subvolume(&target));
 }
 
 #[test]
@@ -264,6 +356,7 @@ fn mkdir_on_an_already_existing_subvolume_passes_through_and_reports_eexist_norm
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "build")]);
+    write_decision(scratch.path(), "+ build\n");
 
     let target = scratch.path().join("build");
     assert!(run_mkdir_with_shim(data_home.path(), &target).success());
@@ -300,6 +393,7 @@ fn normal_mode_logs_only_the_creation_not_every_call() {
         data_home.path(),
         &[(scratch.path(), "node_modules"), (scratch.path(), "other")],
     );
+    write_decision(scratch.path(), "+ node_modules\n");
     let log_file = tempfile::NamedTempFile::new().unwrap();
 
     // A matching name (logged: created) and a non-matching name
@@ -330,6 +424,7 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "+ node_modules\n");
     let log_file = tempfile::NamedTempFile::new().unwrap();
 
     let run = |target: &Path| {
@@ -455,6 +550,7 @@ fn no_log_file_configured_or_writable_is_not_a_crash() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "+ node_modules\n");
 
     let target = scratch.path().join("node_modules");
     // Points at a path whose parent doesn't exist - the open() will

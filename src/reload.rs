@@ -1,8 +1,7 @@
 //! `ghostvolumes reload` (§8.0): load + merge config, validate every
 //! configured root is still BTRFS-backed, compile to `compiled.tsv`,
 //! write atomically. Also invoked automatically at the end of
-//! `scan --save` / `discover --save` and by the cd-hook's
-//! `.ghostvolumes.toml` registration (Step 14).
+//! `scan --save`.
 
 use std::path::Path;
 
@@ -55,7 +54,6 @@ mod tests {
     fn write_config_dir(dir: &Path) {
         fs::create_dir_all(dir.join("roots.d")).unwrap();
         fs::create_dir_all(dir.join("watched.d")).unwrap();
-        fs::create_dir_all(dir.join("projects.d")).unwrap();
         fs::write(
             dir.join("roots.d/00-auto.toml"),
             r#"roots = ["/home/user1"]"#,
