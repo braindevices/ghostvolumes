@@ -72,8 +72,7 @@ pub fn refuse_if_shim_preloaded(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
+    use crate::filenames::SHIM_FILE_NAME;
 
     #[test]
     fn ok_when_ld_preload_is_unset() {
@@ -87,11 +86,8 @@ mod tests {
 
     #[test]
     fn refuses_on_an_exact_single_entry_match() {
-        let err = refuse_if_shim_preloaded(
-            Some("/home/user1/.local/share/ghostvolumes/libghostvolumes_shim.so"),
-            SHIM_FILE_NAME,
-        )
-        .unwrap_err();
+        let ld_preload = format!("/home/user1/.local/share/ghostvolumes/{SHIM_FILE_NAME}");
+        let err = refuse_if_shim_preloaded(Some(&ld_preload), SHIM_FILE_NAME).unwrap_err();
         assert!(err.to_string().contains("refusing to run"));
         assert!(err.to_string().contains("shell-init"));
     }
@@ -100,18 +96,17 @@ mod tests {
     fn refuses_regardless_of_directory_since_only_the_basename_is_compared() {
         // A different install location, a symlinked $HOME, sudo -E with a
         // different effective home, ... - still the same shim by name.
-        let err = refuse_if_shim_preloaded(
-            Some("/some/other/path/libghostvolumes_shim.so"),
-            SHIM_FILE_NAME,
-        )
-        .unwrap_err();
+        let ld_preload = format!("/some/other/path/{SHIM_FILE_NAME}");
+        let err = refuse_if_shim_preloaded(Some(&ld_preload), SHIM_FILE_NAME).unwrap_err();
         assert!(err.to_string().contains("refusing to run"));
     }
 
     #[test]
     fn refuses_on_a_match_among_several_colon_separated_entries() {
-        let ld_preload = "/usr/lib/libsomething.so:/home/user1/.local/share/ghostvolumes/libghostvolumes_shim.so:/other.so";
-        assert!(refuse_if_shim_preloaded(Some(ld_preload), SHIM_FILE_NAME).is_err());
+        let ld_preload = format!(
+            "/usr/lib/libsomething.so:/home/user1/.local/share/ghostvolumes/{SHIM_FILE_NAME}:/other.so"
+        );
+        assert!(refuse_if_shim_preloaded(Some(&ld_preload), SHIM_FILE_NAME).is_err());
     }
 
     #[test]
@@ -121,20 +116,16 @@ mod tests {
 
     #[test]
     fn does_not_match_a_similarly_named_but_different_file() {
-        assert!(
-            refuse_if_shim_preloaded(Some("/usr/lib/libghostvolumes_shim.so.bak"), SHIM_FILE_NAME)
-                .is_ok()
-        );
-        assert!(
-            refuse_if_shim_preloaded(Some("/usr/lib/notlibghostvolumes_shim.so"), SHIM_FILE_NAME)
-                .is_ok()
-        );
+        let with_suffix = format!("/usr/lib/{SHIM_FILE_NAME}.bak");
+        assert!(refuse_if_shim_preloaded(Some(&with_suffix), SHIM_FILE_NAME).is_ok());
+        let with_prefix = format!("/usr/lib/not{SHIM_FILE_NAME}");
+        assert!(refuse_if_shim_preloaded(Some(&with_prefix), SHIM_FILE_NAME).is_ok());
     }
 
     #[test]
     fn error_message_includes_the_raw_ld_preload_value_for_diagnosis() {
-        let ld_preload = "/a/libghostvolumes_shim.so:/b/other.so";
-        let err = refuse_if_shim_preloaded(Some(ld_preload), SHIM_FILE_NAME).unwrap_err();
-        assert!(err.to_string().contains(ld_preload));
+        let ld_preload = format!("/a/{SHIM_FILE_NAME}:/b/other.so");
+        let err = refuse_if_shim_preloaded(Some(&ld_preload), SHIM_FILE_NAME).unwrap_err();
+        assert!(err.to_string().contains(&ld_preload));
     }
 }

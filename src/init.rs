@@ -5,26 +5,32 @@
 
 use std::path::Path;
 
-/// The shim's on-disk filename — deliberately not a generic
-/// `preload.so` some other tool could also be using: this exact name
-/// is what shows up in `LD_PRELOAD`, `ps`, `/proc/*/maps`, and
-/// `preload_guard`'s own refusal message, so it needs to be
-/// identifiable at a glance. Matches `build.rs`'s compiled-artifact
-/// name exactly (the `include_bytes!` path below).
-pub const SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
+use crate::filenames;
 
-const PRELOAD_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libghostvolumes_shim.so"));
+// `env!("GHOSTVOLUMES_SHIM_FILE_NAME")` - not `filenames::SHIM_FILE_NAME`
+// - since `concat!` only accepts literal tokens (which `env!` expands
+// to at this same compile time), not a `const` reference. Both this
+// and `filenames::SHIM_FILE_NAME` read the same `build.rs`-defined
+// value, so they can't drift apart even though neither references the
+// other directly.
+const PRELOAD_SO: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/",
+    env!("GHOSTVOLUMES_SHIM_FILE_NAME")
+));
 
 const DEFAULT_WATCHED: &str = "names = [\"node_modules\", \"target\", \".venv\", \"build\"]\n";
 
 pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
-    std::fs::write(data_dir.join(SHIM_FILE_NAME), PRELOAD_SO)?;
+    std::fs::write(data_dir.join(filenames::SHIM_FILE_NAME), PRELOAD_SO)?;
 
-    for sub in ["roots.d", "watched.d"] {
+    for sub in [filenames::ROOTS_D_DIR, filenames::WATCHED_D_DIR] {
         std::fs::create_dir_all(config_dir.join(sub))?;
     }
-    let defaults_path = config_dir.join("watched.d").join("00-defaults.toml");
+    let defaults_path = config_dir
+        .join(filenames::WATCHED_D_DIR)
+        .join(filenames::DEFAULT_WATCHED_FILE_NAME);
     if !defaults_path.exists() {
         std::fs::write(&defaults_path, DEFAULT_WATCHED)?;
     }
@@ -35,43 +41,64 @@ pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
-    #[test]
-    fn writes_preload_so_bytes() {
+    /// Bundles the `config_dir`/`data_dir` pair every test below needs,
+    /// plus the `TempDir` guard that must outlive them - eliminates the
+    /// repeated `tempdir()` + two `.join()`s at the top of every test.
+    struct TestDirs {
+        _root: tempfile::TempDir,
+        config_dir: PathBuf,
+        data_dir: PathBuf,
+    }
+
+    fn test_dirs() -> TestDirs {
         let root = tempdir().unwrap();
         let config_dir = root.path().join("config");
         let data_dir = root.path().join("data");
+        TestDirs {
+            _root: root,
+            config_dir,
+            data_dir,
+        }
+    }
 
-        init(&config_dir, &data_dir).unwrap();
+    fn defaults_path(config_dir: &Path) -> PathBuf {
+        config_dir
+            .join(filenames::WATCHED_D_DIR)
+            .join(filenames::DEFAULT_WATCHED_FILE_NAME)
+    }
 
-        let written = std::fs::read(data_dir.join(SHIM_FILE_NAME)).unwrap();
+    #[test]
+    fn writes_preload_so_bytes() {
+        let dirs = test_dirs();
+
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+
+        let written = std::fs::read(dirs.data_dir.join(filenames::SHIM_FILE_NAME)).unwrap();
         assert_eq!(written, PRELOAD_SO);
         assert!(!written.is_empty());
     }
 
     #[test]
     fn creates_config_dot_d_directories() {
-        let root = tempdir().unwrap();
-        let config_dir = root.path().join("config");
-        let data_dir = root.path().join("data");
+        let dirs = test_dirs();
 
-        init(&config_dir, &data_dir).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
-        for sub in ["roots.d", "watched.d"] {
-            assert!(config_dir.join(sub).is_dir());
+        for sub in [filenames::ROOTS_D_DIR, filenames::WATCHED_D_DIR] {
+            assert!(dirs.config_dir.join(sub).is_dir());
         }
     }
 
     #[test]
     fn writes_default_watched_names_when_absent() {
-        let root = tempdir().unwrap();
-        let config_dir = root.path().join("config");
-        let data_dir = root.path().join("data");
+        let dirs = test_dirs();
 
-        init(&config_dir, &data_dir).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
-        let text = std::fs::read_to_string(config_dir.join("watched.d/00-defaults.toml")).unwrap();
+        let text = std::fs::read_to_string(defaults_path(&dirs.config_dir)).unwrap();
         let parsed = crate::config::parse_watched(&text).unwrap();
         assert_eq!(
             parsed.names,
@@ -81,43 +108,33 @@ mod tests {
 
     #[test]
     fn does_not_overwrite_existing_defaults_file() {
-        let root = tempdir().unwrap();
-        let config_dir = root.path().join("config");
-        let data_dir = root.path().join("data");
-        std::fs::create_dir_all(config_dir.join("watched.d")).unwrap();
-        std::fs::write(
-            config_dir.join("watched.d/00-defaults.toml"),
-            "names = [\"custom\"]\n",
-        )
-        .unwrap();
+        let dirs = test_dirs();
+        std::fs::create_dir_all(dirs.config_dir.join(filenames::WATCHED_D_DIR)).unwrap();
+        std::fs::write(defaults_path(&dirs.config_dir), "names = [\"custom\"]\n").unwrap();
 
-        init(&config_dir, &data_dir).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
-        let text = std::fs::read_to_string(config_dir.join("watched.d/00-defaults.toml")).unwrap();
+        let text = std::fs::read_to_string(defaults_path(&dirs.config_dir)).unwrap();
         assert_eq!(text, "names = [\"custom\"]\n");
     }
 
     #[test]
     fn idempotent_second_run_succeeds() {
-        let root = tempdir().unwrap();
-        let config_dir = root.path().join("config");
-        let data_dir = root.path().join("data");
+        let dirs = test_dirs();
 
-        init(&config_dir, &data_dir).unwrap();
-        init(&config_dir, &data_dir).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
-        assert!(data_dir.join(SHIM_FILE_NAME).exists());
+        assert!(dirs.data_dir.join(filenames::SHIM_FILE_NAME).exists());
     }
 
     #[test]
     fn extracted_preload_so_is_a_valid_shared_object() {
-        let root = tempdir().unwrap();
-        let config_dir = root.path().join("config");
-        let data_dir = root.path().join("data");
+        let dirs = test_dirs();
 
-        init(&config_dir, &data_dir).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
-        let bytes = std::fs::read(data_dir.join(SHIM_FILE_NAME)).unwrap();
+        let bytes = std::fs::read(dirs.data_dir.join(filenames::SHIM_FILE_NAME)).unwrap();
         // ELF magic number: 0x7f 'E' 'L' 'F'
         assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     }

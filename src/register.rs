@@ -31,12 +31,23 @@ pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filenames;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    /// A fresh project-roots list path under a new tempdir - bundled
+    /// with the `TempDir` guard (which must stay alive for `list_path`
+    /// to remain valid) so callers don't each repeat `tempdir()` +
+    /// `.join(filenames::PROJECT_ROOTS_FILE_NAME)`.
+    fn temp_list_path() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().unwrap();
+        let list_path = dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME);
+        (dir, list_path)
+    }
 
     #[test]
     fn appends_a_new_path() {
-        let dir = tempdir().unwrap();
-        let list_path = dir.path().join("project-roots.txt");
+        let (_dir, list_path) = temp_list_path();
         register(&list_path, "/home/user1/projects/app").unwrap();
         assert_eq!(
             std::fs::read_to_string(&list_path).unwrap(),
@@ -46,8 +57,7 @@ mod tests {
 
     #[test]
     fn is_idempotent_for_an_already_registered_path() {
-        let dir = tempdir().unwrap();
-        let list_path = dir.path().join("project-roots.txt");
+        let (_dir, list_path) = temp_list_path();
         register(&list_path, "/a").unwrap();
         register(&list_path, "/a").unwrap();
         assert_eq!(std::fs::read_to_string(&list_path).unwrap(), "/a\n");
@@ -55,8 +65,7 @@ mod tests {
 
     #[test]
     fn appends_alongside_existing_entries() {
-        let dir = tempdir().unwrap();
-        let list_path = dir.path().join("project-roots.txt");
+        let (_dir, list_path) = temp_list_path();
         register(&list_path, "/a").unwrap();
         register(&list_path, "/b").unwrap();
         assert_eq!(std::fs::read_to_string(&list_path).unwrap(), "/a\n/b\n");
@@ -65,7 +74,10 @@ mod tests {
     #[test]
     fn creates_missing_parent_directories() {
         let dir = tempdir().unwrap();
-        let list_path = dir.path().join("nested/deep/project-roots.txt");
+        let list_path = dir
+            .path()
+            .join("nested/deep")
+            .join(filenames::PROJECT_ROOTS_FILE_NAME);
         register(&list_path, "/a").unwrap();
         assert_eq!(std::fs::read_to_string(&list_path).unwrap(), "/a\n");
     }

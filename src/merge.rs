@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::config;
+use crate::{config, filenames};
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct MergedConfig {
@@ -56,8 +56,8 @@ fn load_watched_dir(dir: &Path) -> anyhow::Result<Vec<String>> {
 /// `~/.config/ghostvolumes`) and merges each per the rules above.
 pub fn load_all(config_dir: &Path) -> anyhow::Result<MergedConfig> {
     Ok(MergedConfig {
-        roots: load_roots_dir(&config_dir.join("roots.d"))?,
-        global_defaults: load_watched_dir(&config_dir.join("watched.d"))?,
+        roots: load_roots_dir(&config_dir.join(filenames::ROOTS_D_DIR))?,
+        global_defaults: load_watched_dir(&config_dir.join(filenames::WATCHED_D_DIR))?,
     })
 }
 
@@ -74,9 +74,13 @@ mod tests {
     #[test]
     fn roots_union_and_dedupe_across_files() {
         let dir = tempdir().unwrap();
-        let roots_d = dir.path().join("roots.d");
+        let roots_d = dir.path().join(filenames::ROOTS_D_DIR);
         fs::create_dir(&roots_d).unwrap();
-        write(&roots_d, "00-auto.toml", r#"roots = ["/", "/home"]"#);
+        write(
+            &roots_d,
+            filenames::AUTO_ROOTS_FILE_NAME,
+            r#"roots = ["/", "/home"]"#,
+        );
         write(&roots_d, "10-local.toml", r#"roots = ["/home", "/dbs"]"#);
 
         let merged = load_roots_dir(&roots_d).unwrap();
@@ -86,11 +90,11 @@ mod tests {
     #[test]
     fn watched_union_and_dedupe_across_files() {
         let dir = tempdir().unwrap();
-        let watched_d = dir.path().join("watched.d");
+        let watched_d = dir.path().join(filenames::WATCHED_D_DIR);
         fs::create_dir(&watched_d).unwrap();
         write(
             &watched_d,
-            "00-defaults.toml",
+            filenames::DEFAULT_WATCHED_FILE_NAME,
             r#"names = ["node_modules", "target"]"#,
         );
         write(
@@ -114,9 +118,13 @@ mod tests {
     #[test]
     fn non_toml_files_are_ignored() {
         let dir = tempdir().unwrap();
-        let roots_d = dir.path().join("roots.d");
+        let roots_d = dir.path().join(filenames::ROOTS_D_DIR);
         fs::create_dir(&roots_d).unwrap();
-        write(&roots_d, "00-auto.toml", r#"roots = ["/"]"#);
+        write(
+            &roots_d,
+            filenames::AUTO_ROOTS_FILE_NAME,
+            r#"roots = ["/"]"#,
+        );
         write(&roots_d, "README.md", "not a config file");
 
         let merged = load_roots_dir(&roots_d).unwrap();
@@ -127,17 +135,17 @@ mod tests {
     fn load_all_combines_both_dirs() {
         let dir = tempdir().unwrap();
         let config_dir = dir.path();
-        for sub in ["roots.d", "watched.d"] {
+        for sub in [filenames::ROOTS_D_DIR, filenames::WATCHED_D_DIR] {
             fs::create_dir(config_dir.join(sub)).unwrap();
         }
         write(
-            &config_dir.join("roots.d"),
-            "00-auto.toml",
+            &config_dir.join(filenames::ROOTS_D_DIR),
+            filenames::AUTO_ROOTS_FILE_NAME,
             r#"roots = ["/"]"#,
         );
         write(
-            &config_dir.join("watched.d"),
-            "00-defaults.toml",
+            &config_dir.join(filenames::WATCHED_D_DIR),
+            filenames::DEFAULT_WATCHED_FILE_NAME,
             r#"names = ["node_modules"]"#,
         );
 

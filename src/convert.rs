@@ -30,7 +30,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{btrfs, cache, decision, project_roots, register};
+use crate::{btrfs, cache, decision, filenames, project_roots, register};
 
 enum RememberChoice {
     No,
@@ -158,7 +158,7 @@ fn containing_dir_pattern(boundary: &Path, candidate: &Path, name: &str) -> Stri
 
 fn append_decision(boundary: &Path, line: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(boundary)?;
-    let file_path = boundary.join(decision::DECISION_FILE_NAME);
+    let file_path = boundary.join(filenames::DECISION_FILE_NAME);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -357,7 +357,7 @@ fn resolve_candidate(
     let existing_decision = decision::resolve(
         candidate,
         &boundary,
-        decision::DECISION_FILE_NAME,
+        filenames::DECISION_FILE_NAME,
         read_decision_file,
     );
 
@@ -427,11 +427,11 @@ mod tests {
     }
 
     fn cache_path(dir: &tempfile::TempDir) -> PathBuf {
-        dir.path().join("compiled.tsv")
+        dir.path().join(filenames::COMPILED_CACHE_FILE_NAME)
     }
 
     fn roots_path(dir: &tempfile::TempDir) -> PathBuf {
-        dir.path().join("project-roots.txt")
+        dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME)
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
         let target = scratch.path().join("node_modules");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(
-            scratch.path().join(".ghostvolumes-decisions"),
+            scratch.path().join(filenames::DECISION_FILE_NAME),
             "+ node_modules\n",
         )
         .unwrap();
@@ -738,7 +738,7 @@ mod tests {
 
         assert!(btrfs::is_subvolume(&target).unwrap());
         assert_eq!(
-            std::fs::read_to_string(scratch.path().join(".ghostvolumes-decisions")).unwrap(),
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
             "+ node_modules\n"
         );
     }
@@ -749,7 +749,7 @@ mod tests {
         let project = scratch.path().join("project");
         let target = project.join("vendor");
         std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(project.join(".ghostvolumes-decisions"), "- vendor\n").unwrap();
+        std::fs::write(project.join(filenames::DECISION_FILE_NAME), "- vendor\n").unwrap();
         let cache_dir = empty_cache();
 
         // Convert is pointed at the *project* directory, not `vendor`
@@ -774,7 +774,11 @@ mod tests {
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("vendor");
         std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(scratch.path().join(".ghostvolumes-decisions"), "- vendor\n").unwrap();
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "- vendor\n",
+        )
+        .unwrap();
         let cache_dir = empty_cache();
 
         // Named explicitly as <path> - a deliberate override attempt -

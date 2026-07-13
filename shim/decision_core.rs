@@ -23,11 +23,6 @@
 // every path keeps both contexts unambiguous without duplicate-import
 // errors.
 
-/// Decision file name (§1) - one per directory, gitignore-style. Not
-/// user-configurable: the same hardcoded name both the shim (`decide()`)
-/// and the CLI (`convert`) look for.
-pub const DECISION_FILE_NAME: &str = ".ghostvolumes-decisions";
-
 /// One parsed, non-comment, non-blank line: `+`/`-` polarity and the
 /// raw pattern text (not yet matched against anything).
 struct DecisionLine {

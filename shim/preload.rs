@@ -13,6 +13,7 @@
 mod btrfs_core;
 mod cache_core;
 mod decision_core;
+mod filenames_core;
 mod project_roots_core;
 mod xdg_core;
 
@@ -71,7 +72,7 @@ fn load_cache() -> Vec<(String, String)> {
     let Some(data_dir) = resolved_data_dir() else {
         return Vec::new();
     };
-    match std::fs::read_to_string(data_dir.join("compiled.tsv")) {
+    match std::fs::read_to_string(data_dir.join(filenames_core::COMPILED_CACHE_FILE_NAME)) {
         Ok(text) => cache_core::parse(&text),
         Err(_) => Vec::new(),
     }
@@ -86,7 +87,7 @@ fn load_project_roots() -> Vec<String> {
     let Some(data_dir) = resolved_data_dir() else {
         return Vec::new();
     };
-    match std::fs::read_to_string(project_roots_core::path_in(&data_dir)) {
+    match std::fs::read_to_string(data_dir.join(filenames_core::PROJECT_ROOTS_FILE_NAME)) {
         Ok(text) => project_roots_core::parse(&text),
         Err(_) => Vec::new(),
     }
@@ -144,7 +145,7 @@ fn load_log_context() -> LogContext {
     let log_path = std::env::var("GHOSTVOLUMES_LOG_FILE")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| resolved_data_dir().map(|dir| dir.join("shim.log")));
+        .or_else(|| resolved_data_dir().map(|dir| dir.join(filenames_core::SHIM_LOG_FILE_NAME)));
 
     let file = log_path
         .and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok())
@@ -292,7 +293,7 @@ fn decide(target: &Path) -> Decision {
         return Decision::Accept;
     }
     let boundary = walkup_boundary(rows, target);
-    match decision_core::resolve(target, &boundary, decision_core::DECISION_FILE_NAME, read_decision_file) {
+    match decision_core::resolve(target, &boundary, filenames_core::DECISION_FILE_NAME, read_decision_file) {
         Some(true) => Decision::Accept,
         Some(false) => Decision::Denied,
         None => Decision::Undecided(boundary),
@@ -310,7 +311,7 @@ fn append_pending_comment(boundary: &Path, target: &Path) {
     let Some(pattern) = decision_core::anchored_pattern(boundary, target) else {
         return;
     };
-    let file_path = boundary.join(decision_core::DECISION_FILE_NAME);
+    let file_path = boundary.join(filenames_core::DECISION_FILE_NAME);
     let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
     if !decision_core::needs_pending_comment(&existing, &pattern) {
         return;

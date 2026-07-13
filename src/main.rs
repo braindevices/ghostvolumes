@@ -17,6 +17,8 @@ mod decision;
 #[cfg(target_os = "linux")]
 mod discover;
 #[cfg(target_os = "linux")]
+mod filenames;
+#[cfg(target_os = "linux")]
 mod init;
 #[cfg(target_os = "linux")]
 mod intercept;
@@ -101,7 +103,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     preload_guard::refuse_if_shim_preloaded(
         std::env::var("LD_PRELOAD").ok().as_deref(),
-        init::SHIM_FILE_NAME,
+        filenames::SHIM_FILE_NAME,
     )?;
     match cli.command {
         Command::Scan { save } => {
@@ -109,7 +111,7 @@ fn main() -> anyhow::Result<()> {
             if save {
                 let config_dir = xdg::config_dir()?;
                 scan::save_roots(&config_dir, &roots)?;
-                let cache_path = xdg::data_dir()?.join("compiled.tsv");
+                let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
                 reload::reload(&config_dir, &cache_path)?;
             } else {
                 for root in &roots {
@@ -120,7 +122,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Reload => {
             let config_dir = xdg::config_dir()?;
-            let cache_path = xdg::data_dir()?.join("compiled.tsv");
+            let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
             reload::reload(&config_dir, &cache_path)
         }
         Command::Init => {
@@ -143,7 +145,7 @@ fn main() -> anyhow::Result<()> {
             let suggestions = discover::group_by_parent(matches);
             if save {
                 for s in &suggestions {
-                    let file_path = s.path.join(decision::DECISION_FILE_NAME);
+                    let file_path = s.path.join(filenames::DECISION_FILE_NAME);
                     let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
                     let new_lines: Vec<String> = s
                         .names
@@ -170,8 +172,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Convert { path, max_depth } => {
             let data_dir = xdg::data_dir()?;
-            let cache_path = data_dir.join("compiled.tsv");
-            let project_roots_path = project_roots::path_in(&data_dir);
+            let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
+            let project_roots_path = data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME);
             convert::convert(
                 &PathBuf::from(path),
                 max_depth,
@@ -180,14 +182,14 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Command::Register { path } => {
-            let list_path = project_roots::path_in(&xdg::data_dir()?);
+            let list_path = xdg::data_dir()?.join(filenames::PROJECT_ROOTS_FILE_NAME);
             register::register(&list_path, &path)
         }
         Command::Intercept { cmd } => {
             let data_dir = xdg::data_dir()?;
-            let cache_path = data_dir.join("compiled.tsv");
-            let project_roots_path = project_roots::path_in(&data_dir);
-            let preload_so_path = data_dir.join(init::SHIM_FILE_NAME);
+            let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
+            let project_roots_path = data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME);
+            let preload_so_path = data_dir.join(filenames::SHIM_FILE_NAME);
             let code =
                 intercept::intercept(&cmd, &preload_so_path, &cache_path, &project_roots_path)?;
             std::process::exit(code);

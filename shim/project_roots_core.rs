@@ -13,15 +13,6 @@
 // Plain `//` comments, not `//!`/`///`: this file gets spliced
 // mid-file into src/project_roots.rs via `include!`.
 
-/// The project-roots file's path, given the resolved XDG data
-/// directory (`xdg_core::data_dir_from`'s result) - lives alongside
-/// `compiled.tsv`/the compiled shim/the debug log, since it's the same
-/// kind of local, per-user, generated state, not project-tree config.
-#[allow(dead_code)]
-pub fn path_in(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join("project-roots.txt")
-}
-
 /// Parses the file's raw text into its list of registered paths - one
 /// non-empty, trimmed line each.
 #[allow(dead_code)]
@@ -85,13 +76,5 @@ mod tests {
     #[test]
     fn needs_append_true_for_empty_file() {
         assert!(needs_append("", "/a"));
-    }
-
-    #[test]
-    fn path_in_joins_the_data_dir() {
-        assert_eq!(
-            path_in(std::path::Path::new("/home/user1/.local/share/ghostvolumes")),
-            std::path::PathBuf::from("/home/user1/.local/share/ghostvolumes/project-roots.txt")
-        );
     }
 }

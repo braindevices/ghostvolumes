@@ -27,7 +27,7 @@
 use std::path::Path;
 
 pub fn shell_init(shell: &str, data_dir: &Path) -> anyhow::Result<String> {
-    let so_path = data_dir.join(crate::init::SHIM_FILE_NAME);
+    let so_path = data_dir.join(crate::filenames::SHIM_FILE_NAME);
     match shell {
         "bash" => Ok(ld_preload_export(&so_path)),
         "zsh" => Ok(ld_preload_export(&so_path)),
@@ -56,7 +56,10 @@ mod tests {
     #[test]
     fn bash_snippet_exports_ld_preload_pointing_at_preload_so() {
         let text = shell_init("bash", &data_dir()).unwrap();
-        assert!(text.contains("/home/user1/.local/share/ghostvolumes/libghostvolumes_shim.so"));
+        assert!(text.contains(&format!(
+            "/home/user1/.local/share/ghostvolumes/{}",
+            crate::filenames::SHIM_FILE_NAME
+        )));
         assert!(text.contains("export LD_PRELOAD"));
     }
 
@@ -69,7 +72,10 @@ mod tests {
     #[test]
     fn zsh_snippet_also_exports_ld_preload() {
         let text = shell_init("zsh", &data_dir()).unwrap();
-        assert!(text.contains("/home/user1/.local/share/ghostvolumes/libghostvolumes_shim.so"));
+        assert!(text.contains(&format!(
+            "/home/user1/.local/share/ghostvolumes/{}",
+            crate::filenames::SHIM_FILE_NAME
+        )));
     }
 
     #[test]

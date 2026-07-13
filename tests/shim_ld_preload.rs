@@ -12,6 +12,11 @@ use std::process::Command;
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
+// This integration-test binary has no `[lib]` target to `use
+// ghostvolumes::...` from — `include!`s the real `src/filenames.rs`
+// instead of hand-keeping local copies of its constants.
+include!("../src/filenames.rs");
+
 fn compiled_shim() -> &'static Path {
     static SHIM: OnceLock<PathBuf> = OnceLock::new();
     SHIM.get_or_init(|| {
@@ -117,22 +122,29 @@ fn fake_home() -> &'static str {
 }
 
 fn write_cache(data_home: &Path, rows: &[(&Path, &str)]) {
-    std::fs::create_dir_all(data_home.join("ghostvolumes")).unwrap();
+    let dir = data_home.join("ghostvolumes");
+    std::fs::create_dir_all(&dir).unwrap();
     let mut text = String::new();
     for (prefix, name) in rows {
         text.push_str(&format!("{}\t{name}\n", prefix.display()));
     }
-    std::fs::write(data_home.join("ghostvolumes/compiled.tsv"), text).unwrap();
+    std::fs::write(dir.join(COMPILED_CACHE_FILE_NAME), text).unwrap();
 }
 
-/// Writes a decision file (ai-work/tasks/decision-model.plan.md §1) at
-/// `project_root/.ghostvolumes-decisions` - the shim's replacement for
-/// the old git-tracked gate. Most of these tests use `project_root ==
-/// scratch.path()`, matching `write_cache`'s row prefix, since that's
-/// also the walk-up boundary the shim resolves to when nothing's
-/// registered in the (absent, in these tests) project-roots list.
+/// The decision file's path at `project_root` (ai-work/tasks/decision-model.plan.md
+/// §1).
+fn decision_file_path(project_root: &Path) -> PathBuf {
+    project_root.join(DECISION_FILE_NAME)
+}
+
+/// Writes a decision file at `project_root` - the shim's replacement
+/// for the old git-tracked gate. Most of these tests use
+/// `project_root == scratch.path()`, matching `write_cache`'s row
+/// prefix, since that's also the walk-up boundary the shim resolves to
+/// when nothing's registered in the (absent, in these tests)
+/// project-roots list.
 fn write_decision(project_root: &Path, text: &str) {
-    std::fs::write(project_root.join(".ghostvolumes-decisions"), text).unwrap();
+    std::fs::write(decision_file_path(project_root), text).unwrap();
 }
 
 fn run_mkdir_with_shim(data_home: &Path, target: &Path) -> std::process::ExitStatus {
@@ -280,8 +292,7 @@ fn undecided_candidate_appends_a_pending_comment_to_the_project_decision_file() 
     assert!(run_mkdir_with_shim(data_home.path(), &target).success());
     assert!(!is_subvolume(&target));
 
-    let decision_text =
-        std::fs::read_to_string(scratch.path().join(".ghostvolumes-decisions")).unwrap();
+    let decision_text = std::fs::read_to_string(decision_file_path(scratch.path())).unwrap();
     assert_eq!(decision_text, "# /node_modules\n");
 }
 
@@ -295,8 +306,7 @@ fn undecided_candidate_does_not_duplicate_the_pending_comment_on_repeat_runs() {
     run_mkdir_with_shim(data_home.path(), &target); // creates the plain dir
     run_mkdir_with_shim(data_home.path(), &target); // EEXIST at the OS level, but decide() still runs
 
-    let decision_text =
-        std::fs::read_to_string(scratch.path().join(".ghostvolumes-decisions")).unwrap();
+    let decision_text = std::fs::read_to_string(decision_file_path(scratch.path())).unwrap();
     assert_eq!(
         decision_text.lines().count(),
         1,
@@ -329,7 +339,7 @@ fn ghostvolumes_auto_yes_bypasses_the_decision_lookup_entirely() {
 
     // Nothing gets recorded - the env var itself is the standing
     // approval, not a decision file entry.
-    assert!(!scratch.path().join(".ghostvolumes-decisions").exists());
+    assert!(!decision_file_path(scratch.path()).exists());
 }
 
 #[test]

@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{btrfs, decision};
+use crate::{btrfs, filenames};
 
 pub struct DiscoveredMatch {
     pub parent: PathBuf,
@@ -106,7 +106,7 @@ pub fn format_decisions(suggestions: &[ProjectSuggestion]) -> String {
     for s in suggestions {
         out.push_str(&format!(
             "# {}\n",
-            s.path.join(decision::DECISION_FILE_NAME).display()
+            s.path.join(filenames::DECISION_FILE_NAME).display()
         ));
         for name in &s.names {
             out.push_str(&format!("+ {name}\n"));

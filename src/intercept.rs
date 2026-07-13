@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::decision;
+use crate::filenames;
 
 /// Every location a decision file could possibly live at the *root* of
 /// a project (§3's `walkup_boundary`): the union of `compiled.tsv`'s
@@ -45,7 +45,7 @@ fn candidate_boundaries(rows: &[(String, String)], project_roots: &[String]) -> 
 fn snapshot(boundaries: &[PathBuf]) -> Vec<Option<String>> {
     boundaries
         .iter()
-        .map(|b| std::fs::read_to_string(b.join(decision::DECISION_FILE_NAME)).ok())
+        .map(|b| std::fs::read_to_string(b.join(filenames::DECISION_FILE_NAME)).ok())
         .collect()
 }
 
@@ -178,9 +178,9 @@ mod tests {
     #[test]
     fn runs_the_command_with_ld_preload_set_and_propagates_its_exit_code() {
         let dir = tempdir().unwrap();
-        let cache_path = dir.path().join("compiled.tsv");
-        let project_roots_path = dir.path().join("project-roots.txt");
-        let preload_so = dir.path().join("libghostvolumes_shim.so");
+        let cache_path = dir.path().join(filenames::COMPILED_CACHE_FILE_NAME);
+        let project_roots_path = dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME);
+        let preload_so = dir.path().join(filenames::SHIM_FILE_NAME);
 
         let code = intercept(
             &["sh".to_string(), "-c".to_string(), "exit 7".to_string()],
@@ -197,12 +197,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        let cache_path = dir.path().join("compiled.tsv");
-        let project_roots_path = dir.path().join("project-roots.txt");
+        let cache_path = dir.path().join(filenames::COMPILED_CACHE_FILE_NAME);
+        let project_roots_path = dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME);
         std::fs::write(&project_roots_path, format!("{}\n", project.display())).unwrap();
-        let preload_so = dir.path().join("libghostvolumes_shim.so");
+        let preload_so = dir.path().join(filenames::SHIM_FILE_NAME);
 
-        let decision_file = project.join(".ghostvolumes-decisions");
+        let decision_file = project.join(filenames::DECISION_FILE_NAME);
         let cmd = format!("echo '# /node_modules' >> {}", decision_file.display());
         let mut reported = Vec::new();
         intercept_with_notifier(
@@ -222,9 +222,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let err = intercept(
             &[],
-            &dir.path().join("libghostvolumes_shim.so"),
-            &dir.path().join("compiled.tsv"),
-            &dir.path().join("project-roots.txt"),
+            &dir.path().join(filenames::SHIM_FILE_NAME),
+            &dir.path().join(filenames::COMPILED_CACHE_FILE_NAME),
+            &dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME),
         )
         .unwrap_err();
         assert!(err.to_string().contains("no command given"));
