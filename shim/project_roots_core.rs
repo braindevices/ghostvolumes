@@ -15,8 +15,8 @@
 
 /// The project-roots file's path, given the resolved XDG data
 /// directory (`xdg_core::data_dir_from`'s result) - lives alongside
-/// `compiled.tsv`/`preload.so`/the debug log, since it's the same kind
-/// of local, per-user, generated state, not project-tree config.
+/// `compiled.tsv`/the compiled shim/the debug log, since it's the same
+/// kind of local, per-user, generated state, not project-tree config.
 #[allow(dead_code)]
 pub fn path_in(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("project-roots.txt")

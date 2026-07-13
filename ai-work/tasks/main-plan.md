@@ -317,9 +317,19 @@ Note none of this changes the coverage picture from §5 — a preloaded shared l
 
 ### 8.2 Shell integration via `shell-init`, not rc-file editing
 
-> **Superseded:** the `cd`-wrapper/`chpwd` hook bullet below is gone —
-> `shell-init` now emits only the `LD_PRELOAD` export
-> (`ai-work/tasks/decision-model.plan.md` §5, §7).
+> **Superseded, and further revised:** the `cd`-wrapper/`chpwd` hook
+> bullet below is gone — `shell-init` now emits only the `LD_PRELOAD`
+> export (`ai-work/tasks/decision-model.plan.md` §5, §7). More: since
+> `intercept` (§5) exists now, `eval`-ing that export into an rc file
+> is no longer recommended at all — doing so makes every `ghostvolumes`
+> subcommand inherit `LD_PRELOAD` too (not just the intended build
+> command), silently breaking `intercept`'s "parent never has it set"
+> invariant and making `intercept` redundant for its main job. See
+> `design.md`'s "shell-init's LD_PRELOAD export is a diagnostic tool"
+> entry for the full reasoning. `shell-init` is kept as a diagnostic
+> command (it prints exactly the value `intercept` uses internally);
+> `ghostvolumes intercept -- bash`/`zsh` is the recommended way to get
+> whole-session coverage instead of a permanent rc-file export.
 
 `cargo install` can't append anything to `.bashrc`/`.zshrc` for you, and silently rewriting a user's rc file is the wrong default regardless. Follow the same pattern as `starship`, `zoxide`, and `direnv` — a subcommand that prints a shell snippet for the user to `eval`:
 

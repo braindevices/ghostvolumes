@@ -25,6 +25,8 @@ mod merge;
 #[cfg(target_os = "linux")]
 mod mountinfo;
 #[cfg(target_os = "linux")]
+mod preload_guard;
+#[cfg(target_os = "linux")]
 mod project_roots;
 #[cfg(target_os = "linux")]
 mod register;
@@ -97,6 +99,10 @@ enum Command {
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    preload_guard::refuse_if_shim_preloaded(
+        std::env::var("LD_PRELOAD").ok().as_deref(),
+        init::SHIM_FILE_NAME,
+    )?;
     match cli.command {
         Command::Scan { save } => {
             let roots = scan::detect_roots()?;
@@ -181,7 +187,7 @@ fn main() -> anyhow::Result<()> {
             let data_dir = xdg::data_dir()?;
             let cache_path = data_dir.join("compiled.tsv");
             let project_roots_path = project_roots::path_in(&data_dir);
-            let preload_so_path = data_dir.join("preload.so");
+            let preload_so_path = data_dir.join(init::SHIM_FILE_NAME);
             let code =
                 intercept::intercept(&cmd, &preload_so_path, &cache_path, &project_roots_path)?;
             std::process::exit(code);

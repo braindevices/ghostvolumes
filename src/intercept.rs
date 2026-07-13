@@ -180,7 +180,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache_path = dir.path().join("compiled.tsv");
         let project_roots_path = dir.path().join("project-roots.txt");
-        let preload_so = dir.path().join("preload.so");
+        let preload_so = dir.path().join("libghostvolumes_shim.so");
 
         let code = intercept(
             &["sh".to_string(), "-c".to_string(), "exit 7".to_string()],
@@ -200,7 +200,7 @@ mod tests {
         let cache_path = dir.path().join("compiled.tsv");
         let project_roots_path = dir.path().join("project-roots.txt");
         std::fs::write(&project_roots_path, format!("{}\n", project.display())).unwrap();
-        let preload_so = dir.path().join("preload.so");
+        let preload_so = dir.path().join("libghostvolumes_shim.so");
 
         let decision_file = project.join(".ghostvolumes-decisions");
         let cmd = format!("echo '# /node_modules' >> {}", decision_file.display());
@@ -222,7 +222,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let err = intercept(
             &[],
-            &dir.path().join("preload.so"),
+            &dir.path().join("libghostvolumes_shim.so"),
             &dir.path().join("compiled.tsv"),
             &dir.path().join("project-roots.txt"),
         )

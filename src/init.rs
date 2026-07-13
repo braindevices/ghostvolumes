@@ -5,13 +5,21 @@
 
 use std::path::Path;
 
-const PRELOAD_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/preload.so"));
+/// The shim's on-disk filename — deliberately not a generic
+/// `preload.so` some other tool could also be using: this exact name
+/// is what shows up in `LD_PRELOAD`, `ps`, `/proc/*/maps`, and
+/// `preload_guard`'s own refusal message, so it needs to be
+/// identifiable at a glance. Matches `build.rs`'s compiled-artifact
+/// name exactly (the `include_bytes!` path below).
+pub const SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
+
+const PRELOAD_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libghostvolumes_shim.so"));
 
 const DEFAULT_WATCHED: &str = "names = [\"node_modules\", \"target\", \".venv\", \"build\"]\n";
 
 pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
-    std::fs::write(data_dir.join("preload.so"), PRELOAD_SO)?;
+    std::fs::write(data_dir.join(SHIM_FILE_NAME), PRELOAD_SO)?;
 
     for sub in ["roots.d", "watched.d"] {
         std::fs::create_dir_all(config_dir.join(sub))?;
@@ -37,7 +45,7 @@ mod tests {
 
         init(&config_dir, &data_dir).unwrap();
 
-        let written = std::fs::read(data_dir.join("preload.so")).unwrap();
+        let written = std::fs::read(data_dir.join(SHIM_FILE_NAME)).unwrap();
         assert_eq!(written, PRELOAD_SO);
         assert!(!written.is_empty());
     }
@@ -98,7 +106,7 @@ mod tests {
         init(&config_dir, &data_dir).unwrap();
         init(&config_dir, &data_dir).unwrap();
 
-        assert!(data_dir.join("preload.so").exists());
+        assert!(data_dir.join(SHIM_FILE_NAME).exists());
     }
 
     #[test]
@@ -109,7 +117,7 @@ mod tests {
 
         init(&config_dir, &data_dir).unwrap();
 
-        let bytes = std::fs::read(data_dir.join("preload.so")).unwrap();
+        let bytes = std::fs::read(data_dir.join(SHIM_FILE_NAME)).unwrap();
         // ELF magic number: 0x7f 'E' 'L' 'F'
         assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     }

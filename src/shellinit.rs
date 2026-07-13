@@ -1,17 +1,33 @@
-//! `ghostvolumes shell-init <shell>` (§8.2): prints a shell snippet for
-//! the user to `eval`, following the same pattern as `starship`,
-//! `zoxide`, `direnv` — never edits rc files directly. Only the
-//! `LD_PRELOAD` export remains — no `cd` wrapper/`chpwd` hook: `ensure`
+//! `ghostvolumes shell-init <shell>` (§8.2): prints the `LD_PRELOAD`
+//! export line, following the same output-a-snippet pattern as
+//! `starship`/`zoxide`/`direnv` — never edits rc files directly. Only
+//! the export remains — no `cd` wrapper/`chpwd` hook: `ensure`
 //! (cd-hook) was removed entirely
-//! (ai-work/tasks/decision-model.plan.md §5/§7). Its old
-//! responsibilities (proactive pre-creation, repo-local-config
-//! registration, plain-directory warnings) all have homes elsewhere now
-//! — see `convert` (§6) and `intercept` (§5).
+//! (ai-work/tasks/decision-model.plan.md §5/§7).
+//!
+//! **Not recommended to `eval` into an rc file, despite the pattern
+//! this follows.** Doing so makes `LD_PRELOAD` inherited by every
+//! process the shell spawns — including every `ghostvolumes`
+//! subcommand itself (`intercept`, `convert`, `register`, ...), which
+//! silently breaks `intercept`'s own documented invariant ("the parent
+//! never has `LD_PRELOAD` set on itself, only the child does") since
+//! `ld.so` processes `LD_PRELOAD` at `exec()` time, before any of this
+//! crate's own code ever runs — there's no way for a running process to
+//! un-preload a library that's already mapped into itself. It also
+//! makes `intercept` redundant for its main job (every command already
+//! gets shim coverage regardless of wrapping), leaving only its
+//! post-run notice as unique value. This function/subcommand exists
+//! mainly to show, precisely, what `LD_PRELOAD` value `intercept` sets
+//! internally — a diagnostic/reference tool, not a setup step. For
+//! whole-session shim coverage without that downside, prefer
+//! `ghostvolumes intercept -- bash` (or `zsh`) — an explicit,
+//! deliberate wrapped subshell, not a permanent export on the parent
+//! shell.
 
 use std::path::Path;
 
 pub fn shell_init(shell: &str, data_dir: &Path) -> anyhow::Result<String> {
-    let so_path = data_dir.join("preload.so");
+    let so_path = data_dir.join(crate::init::SHIM_FILE_NAME);
     match shell {
         "bash" => Ok(ld_preload_export(&so_path)),
         "zsh" => Ok(ld_preload_export(&so_path)),
@@ -40,7 +56,7 @@ mod tests {
     #[test]
     fn bash_snippet_exports_ld_preload_pointing_at_preload_so() {
         let text = shell_init("bash", &data_dir()).unwrap();
-        assert!(text.contains("/home/user1/.local/share/ghostvolumes/preload.so"));
+        assert!(text.contains("/home/user1/.local/share/ghostvolumes/libghostvolumes_shim.so"));
         assert!(text.contains("export LD_PRELOAD"));
     }
 
@@ -53,7 +69,7 @@ mod tests {
     #[test]
     fn zsh_snippet_also_exports_ld_preload() {
         let text = shell_init("zsh", &data_dir()).unwrap();
-        assert!(text.contains("/home/user1/.local/share/ghostvolumes/preload.so"));
+        assert!(text.contains("/home/user1/.local/share/ghostvolumes/libghostvolumes_shim.so"));
     }
 
     #[test]

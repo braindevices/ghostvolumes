@@ -1,5 +1,8 @@
 //! Compiles `shim/preload.rs` via bare `rustc` (never `cargo build` —
-//! see plan §8.1 for why) into `$OUT_DIR/preload.so`. `src/init.rs`
+//! see plan §8.1 for why) into `$OUT_DIR/libghostvolumes_shim.so` —
+//! named for identifiability (in `LD_PRELOAD`, `ps`, `/proc/*/maps`,
+//! `preload_guard`'s own error message, etc.), not a generic
+//! `preload.so` some other tool could also be using. `src/init.rs`
 //! embeds the result via `include_bytes!`. This is the only place
 //! `rustc` is invoked for the shim: `ghostvolumes init` (run by the
 //! user after install) just extracts the already-compiled bytes.
@@ -35,7 +38,7 @@ fn main() {
     }
 
     let shim_src = PathBuf::from(&manifest_dir).join("shim/preload.rs");
-    let shim_so = PathBuf::from(&out_dir).join("preload.so");
+    let shim_so = PathBuf::from(&out_dir).join("libghostvolumes_shim.so");
 
     let mut cmd = Command::new("rustc");
     cmd.args([

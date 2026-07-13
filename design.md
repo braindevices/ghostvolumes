@@ -21,7 +21,8 @@ disposable build artifacts. One reactive enforcement path — an
 happens — plus `ghostvolumes convert <path>` for migrating
 already-populated directories (or bootstrapping a brand-new project's
 first decisions) explicitly. There is no proactive/pre-creation path
-anymore — see "Decision files" below for why, and what replaced it.
+anymore — see "No VCS detection anywhere" under Key decisions below
+for why, and what replaced it.
 
 ## Non-goals (explicit, not just unfinished)
 
@@ -91,6 +92,76 @@ noting an undecided candidate, which a human turns into a real `+`/`-`
 line by hand. `ghostvolumes convert <path>` is the one place actual
 prompting happens, since it's an explicit, deliberate, human-run CLI
 command with no such constraint.
+
+**`shell-init`'s `LD_PRELOAD` export is a diagnostic tool now, not
+something to `eval` into an rc file — `intercept` is the sole intended
+activation path.** `ld.so` consults `LD_PRELOAD` at `exec()` time,
+before any of this crate's own code runs, and there is no way to
+un-preload an already-mapped library from inside a running process
+afterward. So exporting it globally in a shell rc file means *every*
+process that shell spawns inherits it — including every `ghostvolumes`
+subcommand itself (`intercept`, `convert`, `register`, ...), not just
+the build command a user actually meant to wrap. Verified directly:
+`LD_PRELOAD=/some/path ./a-binary` produces an `ld.so: ... ignored`
+line on that binary's own startup, before its `main()` ever runs, when
+the path doesn't resolve — proof `ld.so` acts on the *calling* process
+too, not only on whatever it later spawns. Two consequences: `intercept`'s
+own documented invariant ("the shim only ever loads into the child,
+never the parent") silently breaks, since the parent (`ghostvolumes`
+itself) now has it too; and `intercept` becomes redundant for its main
+job, since every command already gets shim coverage regardless of
+wrapping, leaving only its post-run notice as unique value. (Note:
+`Command::env("LD_PRELOAD", ...)` on the *child* side is unaffected by
+any of this — it replaces the inherited value outright rather than
+appending to it, confirmed empirically, so the child process itself
+never ends up with a literal duplicated/colon-joined entry, and even a
+hypothetical duplicate wouldn't run the shim's constructor twice —
+`ld.so` deduplicates identical library paths by realpath/inode.) The
+practical fix for whole-session coverage without this downside:
+`ghostvolumes intercept -- bash` (or `zsh`) — a deliberate wrapped
+subshell, where everything inside genuinely is the "child," rather
+than a permanent export on the outer login shell.
+
+**`ghostvolumes` refuses to run at all if its own shim is already in
+`LD_PRELOAD` (`preload_guard.rs`) — enforcing the paragraph above
+rather than just documenting it.** Checked once, unconditionally, right
+after argument parsing and before dispatching to *any* subcommand —
+not a warning, a hard refusal.
+
+*Why every subcommand, with no exception for running from inside an
+`intercept -- bash` session:* it's tempting to want `ghostvolumes
+convert`/`register`/etc. to still work there, since that session is
+already "wrapped." But tracing through the actual designed workflow
+turns up no legitimate case for it: `convert` is only ever meant to run
+on a brand-new project *before* anything is wrapped (nothing to convert
+yet otherwise), and `intercept`'s own "undecided path found" notice only
+prints *after* the wrapped command (or, for `intercept -- bash`, the
+whole session) exits — by which point the user is already back outside
+any wrapper. Managing decisions and being inside a wrapped build shell
+are two different activities that never need to overlap; the point of
+`intercept -- bash` is specifically for `ghostvolumes` to be invisible
+inside it, not reachable inside it. Carving out an exception (e.g. a
+companion env var `intercept` sets on its child, marking that session
+as "legitimately wrapped") would only reintroduce the same class of
+implicit, hard-to-audit coupling this whole redesign has otherwise
+avoided, to support a workflow nobody actually has.
+
+*Why match by the shim's filename alone, not its full resolved path:*
+a full-path comparison needs `$HOME`/`$XDG_DATA_HOME` to resolve
+identically both when the (not-recommended) rc-file export was written
+*and* right now — a symlinked `$HOME`, `sudo -E` with a different
+effective home, or a container remounting home would each silently
+break that equality check even though the exact same file is loaded,
+a false negative in precisely the confusing case this guard exists to
+catch. Filename-only matching has no such blind spot and doesn't need
+`$HOME` to resolve at all — its own failure mode (some *unrelated* file
+elsewhere on disk coincidentally named `libghostvolumes_shim.so`) is
+negligible by comparison. The compiled shim's filename was deliberately
+renamed away from a generic `preload.so` to this distinctive one
+specifically so it could be matched this confidently, both here and by
+a human skimming `LD_PRELOAD`/`ps`/`/proc/*/maps` output. A safety check
+whose only job is catching one specific misconfiguration should fail
+loud/often, not silent/rare.
 
 **Config: only the CLI parses TOML; the shim reads a flat, root-keyed
 TSV cache (`compiled.tsv`) instead.**
