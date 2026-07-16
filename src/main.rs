@@ -51,18 +51,27 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use clap::{Parser, Subcommand};
 
-/// `CARGO_PKG_VERSION` alone (e.g. "0.3.1") doesn't say *which* commit
-/// was actually built - two installs both claiming "0.3.1" could be
+/// `CARGO_PKG_VERSION` alone (e.g. "0.3.2") doesn't say *which* commit
+/// was actually built - two installs both claiming "0.3.2" could be
 /// meaningfully different if the version wasn't bumped between them.
 /// `git describe`'s output (via `build.rs`'s `vergen-gitcl` call) adds
-/// that: exactly "v0.3.1" when built right at that tag, or
-/// "v0.3.1-3-gabc1234" three commits past it. Needs a tag to actually
+/// that: exactly "v0.3.2" when built right at that tag, or
+/// "v0.3.2-3-gabc1234" three commits past it. Needs a tag to actually
 /// exist somewhere in history to be meaningful - with none at all,
 /// `git describe` falls back to the bare commit hash instead (see
 /// `CHANGELOG.md`'s 0.3.1 entry for this project's own tagging).
+///
+/// `GHOSTVOLUMES_VERSION_SUFFIX` (also `build.rs`, its own
+/// `current_branch()`/`version_suffix()`) adds a SemVer pre-release
+/// label for this project's GitFlow-shaped branches - empty on
+/// `main`/`master`/detached, `-alpha` on `develop`, `-rc` on
+/// `hotfix/*`, `-dev` on anything else (`feature/*` included) - since
+/// `VERGEN_GIT_DESCRIBE`'s own "commits past the last tag" count alone
+/// can't distinguish which branch a build came from.
 #[cfg(target_os = "linux")]
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
+    env!("GHOSTVOLUMES_VERSION_SUFFIX"),
     " (",
     env!("VERGEN_GIT_DESCRIBE"),
     ")"

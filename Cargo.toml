@@ -1,6 +1,6 @@
 [package]
 name = "ghostvolumes"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Isolate volatile build artifacts (node_modules, target, .venv, build) into unsnapshotted BTRFS subvolumes"
 license = "MIT OR Apache-2.0"

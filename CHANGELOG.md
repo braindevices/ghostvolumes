@@ -2,6 +2,10 @@
 
 Notable changes to this project, loosely following [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.3.2 — 2026-07-16
+
+- **Added** a branch-based SemVer pre-release suffix to `ghostvolumes --version`, on top of 0.3.1's `git describe` output — this project's GitFlow-shaped branches (`.github/workflows/ci.yml`: `main` = release, `develop` = pre-release, plus `hotfix/*`/`feature/*`) map onto `-alpha` (`develop`), `-rc` (`hotfix/*`), `-dev` (anything else), or no suffix at all (`main`/`master`/detached HEAD). `git describe`'s own "commits past the last tag" count alone can't distinguish which branch a build came from — e.g. `0.3.2-alpha (v0.3.1-3-gabc1234)` on `develop` vs. `0.3.2 (v0.3.1)` on `main`. Computed independently in `build.rs` via its own `git rev-parse --abbrev-ref HEAD` call, since `vergen-gitcl`'s own branch detection only surfaces as a `cargo:rustc-env` var for the *final crate*, not readable back mid-build-script.
+
 ## 0.3.1 — 2026-07-16
 
 - **Added** `git describe` output to `ghostvolumes --version` (e.g. `0.3.1 (v0.3.1)`, or `0.3.1 (v0.3.1-3-gabc1234)` a few commits past a tag) via `vergen-gitcl` in `build.rs` — `CARGO_PKG_VERSION` alone can't distinguish two builds that both claim the same version but come from different commits. Chose the `git`-CLI-shelling-out backend over `vergen-gix`/`vergen-git2`: `git` is already a hard prerequisite for this project's only supported install path (`cargo install --git`), so shelling out to it costs nothing extra, unlike `vergen-gix`'s ~500-crate transitive dependency tree or `vergen-git2`'s libgit2 C dependency.

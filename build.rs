@@ -26,6 +26,47 @@ use vergen_gitcl::{Emitter, Gitcl};
 
 const SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
 
+/// The current branch name via `git rev-parse --abbrev-ref HEAD` -
+/// `vergen-gitcl` emits `VERGEN_GIT_BRANCH` too, but only as a
+/// `cargo:rustc-env` instruction for the *final crate* to read via
+/// `env!()`; that's not readable back here, mid-build-script, so the
+/// branch-suffix decision below needs its own independent git
+/// invocation. `None` if detached (bare `git rev-parse --abbrev-ref
+/// HEAD` prints the literal string "HEAD" in that case, e.g. exactly
+/// at a tag via `cargo install --git --tag`) or if `git`/`.git` aren't
+/// available at all - both treated as "no branch-based opinion,"
+/// which resolves to the same empty, release-shaped suffix as `main`.
+fn current_branch() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        return None;
+    }
+    Some(branch)
+}
+
+/// This project's GitFlow-shaped branch model (`.github/workflows/ci.yml`:
+/// `main` = release, `develop` = pre-release, plus `hotfix/*`/`feature/*`)
+/// mapped onto SemVer pre-release suffixes, so `--version` distinguishes
+/// which line of development a build came from at a glance - on top of
+/// (not instead of) `VERGEN_GIT_DESCRIBE`'s own "how far from a tag"
+/// signal, which alone can't tell `develop` and `main` apart if both
+/// happen to sit the same distance from their nearest tag.
+fn version_suffix(branch: Option<&str>) -> &'static str {
+    match branch {
+        Some("main") | Some("master") | None => "",
+        Some("develop") => "-alpha",
+        Some(b) if b.starts_with("hotfix/") => "-rc",
+        Some(_) => "-dev",
+    }
+}
+
 fn main() {
     // Emitted unconditionally, before the non-Linux early return below
     // - cheap, and avoids a future landmine where some as-yet-unwritten
@@ -53,6 +94,9 @@ fn main() {
         .expect("failed to configure vergen-gitcl git instructions")
         .emit()
         .expect("failed to emit vergen-gitcl build instructions");
+
+    let suffix = version_suffix(current_branch().as_deref());
+    println!("cargo:rustc-env=GHOSTVOLUMES_VERSION_SUFFIX={suffix}");
 
     let target = env::var("TARGET").unwrap();
     // On non-Linux, src/main.rs's Command::new mod (and everything
