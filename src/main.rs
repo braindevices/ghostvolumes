@@ -23,6 +23,8 @@ mod init;
 #[cfg(target_os = "linux")]
 mod intercept;
 #[cfg(target_os = "linux")]
+mod lock;
+#[cfg(target_os = "linux")]
 mod merge;
 #[cfg(target_os = "linux")]
 mod mountinfo;
@@ -31,7 +33,7 @@ mod preload_guard;
 #[cfg(target_os = "linux")]
 mod project_roots;
 #[cfg(target_os = "linux")]
-mod register;
+mod projects;
 #[cfg(target_os = "linux")]
 mod reload;
 #[cfg(target_os = "linux")]
@@ -87,8 +89,11 @@ enum Command {
         #[arg(long)]
         max_depth: Option<u32>,
     },
-    /// Register a project-root path for a narrower decision-file walk-up boundary
-    Register { path: String },
+    /// Manage the registered project-roots list
+    Projects {
+        #[command(subcommand)]
+        action: ProjectsAction,
+    },
     /// Run <cmd> with the shim preloaded into it (and only it)
     Intercept {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -96,6 +101,18 @@ enum Command {
     },
     /// Print the shell integration snippet for eval
     ShellInit { shell: String },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+enum ProjectsAction {
+    /// List every registered project root, flagging any that no longer exist
+    List,
+    /// Register a project-root path for a narrower decision-file walk-up boundary
+    Register { path: String },
+    /// Remove a project root. With no path: scan every entry and interactively
+    /// offer to prune ones that no longer exist on disk
+    Unregister { path: Option<String> },
 }
 
 #[cfg(target_os = "linux")]
@@ -161,9 +178,14 @@ fn main() -> anyhow::Result<()> {
                         .create(true)
                         .append(true)
                         .open(&file_path)?;
-                    for line in new_lines {
-                        writeln!(file, "{line}")?;
-                    }
+                    // One write_all call for the whole block of new
+                    // lines, not one writeln! per line - see
+                    // register.rs's identical fix
+                    // (ai-work/tasks/atomic-file-io.plan.md §3); also
+                    // makes this whole batch of lines land as one
+                    // atomic unit rather than N separate appends.
+                    let block: String = new_lines.iter().map(|line| format!("{line}\n")).collect();
+                    file.write_all(block.as_bytes())?;
                 }
             } else {
                 print!("{}", discover::format_decisions(&suggestions));
@@ -179,11 +201,27 @@ fn main() -> anyhow::Result<()> {
                 max_depth,
                 &cache_path,
                 &project_roots_path,
+                &data_dir,
             )
         }
-        Command::Register { path } => {
+        Command::Projects { action } => {
             let list_path = xdg::data_dir()?.join(filenames::PROJECT_ROOTS_FILE_NAME);
-            register::register(&list_path, &path)
+            match action {
+                ProjectsAction::List => {
+                    for (path, exists) in projects::list_projects(&list_path) {
+                        if exists {
+                            println!("{path}");
+                        } else {
+                            println!("{path} (missing)");
+                        }
+                    }
+                    Ok(())
+                }
+                ProjectsAction::Register { path } => projects::register(&list_path, &path),
+                ProjectsAction::Unregister { path } => {
+                    projects::unregister(&list_path, path.as_deref())
+                }
+            }
         }
         Command::Intercept { cmd } => {
             let data_dir = xdg::data_dir()?;

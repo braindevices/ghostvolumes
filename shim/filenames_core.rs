@@ -35,8 +35,15 @@ pub const DECISION_FILE_NAME: &str = ".ghostvolumes-decisions";
 
 /// The project-roots list (§3) - plain-text, one path per line, giving
 /// the decision-file walk-up a narrower stopping boundary than the
-/// broader `roots.d` entries alone.
-pub const PROJECT_ROOTS_FILE_NAME: &str = "project-roots.txt";
+/// broader `roots.d` entries alone. `.list`, not `.txt`
+/// (ai-work/tasks/atomic-file-io.plan.md §4) - not to say this file is
+/// disposable (it's genuine, persistent user data with no other source
+/// of truth, unlike `compiled.tsv`), but `.txt` invites hand-editing,
+/// which races the shim's/CLI's own atomic reads and writes of it.
+/// Mutate it live via `ghostvolumes projects register`/`unregister`;
+/// persisting/syncing the file itself as a whole (backup, disk
+/// migration, a dotfile manager) is fine.
+pub const PROJECT_ROOTS_FILE_NAME: &str = "project-roots.list";
 
 /// The shim's own debug log (§8.5) - shim-only (the CLI never reads or
 /// writes it), kept here anyway so every on-disk filename is
@@ -44,3 +51,12 @@ pub const PROJECT_ROOTS_FILE_NAME: &str = "project-roots.txt";
 /// exception elsewhere.
 #[allow(dead_code)]
 pub const SHIM_LOG_FILE_NAME: &str = "shim.log";
+
+/// Per-project-boundary advisory lock files live under this
+/// subdirectory of the data dir (ai-work/tasks/atomic-file-io.plan.md
+/// §2/§6) - both the shim (creating a subvolume) and the CLI
+/// (`convert`'s directory swap) need to compute the same lock path for
+/// a given boundary, so this directory name is shared here rather than
+/// living only on the CLI side.
+#[allow(dead_code)]
+pub const LOCKS_DIR: &str = "locks";

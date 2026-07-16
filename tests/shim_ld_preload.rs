@@ -16,6 +16,9 @@ use tempfile::TempDir;
 // ghostvolumes::...` from — `include!`s the real `src/filenames.rs`
 // instead of hand-keeping local copies of its constants.
 include!("../src/filenames.rs");
+// Same reasoning - the real boundary_lock_path()/open_lock_file(),
+// used to simulate a concurrent convert holding the per-project lock.
+include!("../src/lock.rs");
 
 fn compiled_shim() -> &'static Path {
     static SHIM: OnceLock<PathBuf> = OnceLock::new();
@@ -201,6 +204,35 @@ fn path_outside_every_configured_root_stays_plain() {
     let target = unrelated.path().join("node_modules");
     assert!(run_mkdir_with_shim(data_home.path(), &target).success());
     assert!(!is_subvolume(&target));
+}
+
+#[test]
+fn lock_contention_falls_through_to_a_plain_mkdir_rather_than_blocking() {
+    // The shim side of the shim-vs-convert directory-swap lock
+    // (ai-work/tasks/atomic-file-io.plan.md §6): simulates a `convert`
+    // already holding this project's boundary lock (as it would mid
+    // create/copy/rename) while the shim tries to create the same
+    // subvolume - the shim's non-blocking try_lock must lose gracefully,
+    // falling through to a real (plain) mkdir rather than blocking the
+    // build or erroring.
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "+ node_modules\n");
+
+    let data_dir = data_home.path().join("ghostvolumes");
+    let lock_path = boundary_lock_path(&data_dir.join(LOCKS_DIR), scratch.path());
+    let lock_file = open_lock_file(&lock_path).unwrap();
+    lock_file.lock().unwrap();
+
+    let target = scratch.path().join("node_modules");
+    assert!(run_mkdir_with_shim(data_home.path(), &target).success());
+    assert!(
+        !is_subvolume(&target),
+        "lock contention must fall through to a plain mkdir, not block or fail"
+    );
+
+    drop(lock_file);
 }
 
 #[test]

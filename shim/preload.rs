@@ -14,6 +14,7 @@ mod btrfs_core;
 mod cache_core;
 mod decision_core;
 mod filenames_core;
+mod lock_core;
 mod project_roots_core;
 mod xdg_core;
 
@@ -190,7 +191,16 @@ fn log_line(msg: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = writeln!(file, "[{unix_secs}] [pid {}] {msg}", std::process::id());
+    // One write_all call for the whole formatted line, not writeln!'s
+    // multi-piece format string (each literal/argument is its own
+    // write() syscall) - concurrent shim instances (e.g. many processes
+    // under one `make -j`) could otherwise interleave/garble each
+    // other's log lines (ai-work/tasks/atomic-file-io.plan.md §3). The
+    // `Mutex` above only serializes threads within *this* process; it's
+    // this single-write_all that makes a line atomic across processes
+    // too, on an O_APPEND-opened file.
+    let line = format!("[{unix_secs}] [pid {}] {msg}\n", std::process::id());
+    let _ = file.write_all(line.as_bytes());
 }
 
 /// Always logged, in both normal and debug mode — reserved for
@@ -264,7 +274,11 @@ enum Decision {
     /// file's own directory), so `handle_intercept` can append a
     /// pending-comment line there (§4) without recomputing it.
     Undecided(PathBuf),
-    Accept,
+    /// Carries the same walk-up boundary too - `try_create_subvolume`
+    /// needs it to compute which per-boundary lock file coordinates
+    /// with `convert`'s directory swap (ai-work/tasks/atomic-file-io.plan.md
+    /// §6).
+    Accept(PathBuf),
 }
 
 /// Does `target` match a watched name under a configured root (one
@@ -288,13 +302,13 @@ fn decide(target: &Path) -> Decision {
     if subvol_check.unwrap_or(false) {
         return Decision::AlreadySubvolume;
     }
+    let boundary = walkup_boundary(rows, target);
     if auto_yes_enabled() {
         log_debug(|| format!("{} GHOSTVOLUMES_AUTO_YES set -> bypassing decision lookup", target.display()));
-        return Decision::Accept;
+        return Decision::Accept(boundary);
     }
-    let boundary = walkup_boundary(rows, target);
     match decision_core::resolve(target, &boundary, filenames_core::DECISION_FILE_NAME, read_decision_file) {
-        Some(true) => Decision::Accept,
+        Some(true) => Decision::Accept(boundary),
         Some(false) => Decision::Denied,
         None => Decision::Undecided(boundary),
     }
@@ -322,20 +336,53 @@ fn append_pending_comment(boundary: &Path, target: &Path) {
     }
 }
 
+/// Outcome of `try_create_subvolume` - a plain `bool` can't distinguish
+/// "the ioctl itself failed" from "skipped because another process
+/// (almost certainly `convert`, mid directory-swap) holds this
+/// project's lock right now" (ai-work/tasks/atomic-file-io.plan.md
+/// §6), which `handle_intercept`'s logging needs to tell apart.
+enum CreateResult {
+    Created,
+    LockContended,
+    Failed,
+}
+
 /// Attempts `BTRFS_IOC_SUBVOL_CREATE` for `target`, tolerating
 /// `EEXIST` gracefully - real traces show tools retry directory
 /// creation bottom-up after an initial `ENOENT` on the leaf, which
 /// looks like duplicate `mkdir` calls for the same path (plan §5
 /// point 7).
-fn try_create_subvolume(target: &Path) -> bool {
+///
+/// Guarded by a non-blocking `try_lock()` on `boundary`'s per-project
+/// lock file (ai-work/tasks/atomic-file-io.plan.md §6) - coordinates
+/// with `convert`'s directory-swap, which takes the same lock
+/// (blocking) around its own create/copy/rename sequence for a
+/// candidate under this same boundary. Never blocks: this runs inside
+/// an intercepted `mkdir`/`mkdirat` call, and a hang here would freeze
+/// the host build - on contention (or if the lock can't be
+/// established at all, e.g. `$HOME`/`$XDG_DATA_HOME` don't resolve),
+/// this skips creating a subvolume for *this* call and falls through
+/// to the real syscall, same as any other decline; a later build or an
+/// explicit `convert` picks it up.
+fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str()))
     else {
-        return false;
+        return CreateResult::Failed;
     };
+    let Some(data_dir) = resolved_data_dir() else {
+        return CreateResult::Failed;
+    };
+    let lock_path = lock_core::boundary_lock_path(&data_dir.join(filenames_core::LOCKS_DIR), boundary);
+    let Ok(lock_file) = lock_core::open_lock_file(&lock_path) else {
+        return CreateResult::Failed;
+    };
+    if lock_file.try_lock().is_err() {
+        return CreateResult::LockContended;
+    }
     match btrfs_core::create_subvolume(parent, name) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => true,
-        Err(_) => false,
+        Ok(()) => CreateResult::Created,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => CreateResult::Created,
+        Err(_) => CreateResult::Failed,
     }
 }
 
@@ -354,19 +401,29 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
     // ai-work/tasks/ci-debug-log-test.plan.md).
     log_debug(|| format!("{syscall} {} -> ENTER", target.display()));
     match decide(target) {
-        Decision::Accept => {
-            if try_create_subvolume(target) {
+        Decision::Accept(boundary) => match try_create_subvolume(target, &boundary) {
+            CreateResult::Created => {
                 log_important(format!("{syscall}: created subvolume {}", target.display()));
                 log_debug(|| format!("{syscall} {} -> ACCEPT (created subvolume)", target.display()));
                 true
-            } else {
+            }
+            CreateResult::LockContended => {
+                log_debug(|| {
+                    format!(
+                        "{syscall} {} -> SKIP (another process is converting this project right now)",
+                        target.display()
+                    )
+                });
+                false
+            }
+            CreateResult::Failed => {
                 log_important(format!(
                     "{syscall}: failed to create subvolume {}, falling back to real {syscall}",
                     target.display()
                 ));
                 false
             }
-        }
+        },
         Decision::AlreadySubvolume => {
             log_debug(|| format!("{syscall} {} -> SKIP (already a subvolume)", target.display()));
             false

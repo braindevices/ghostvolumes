@@ -50,6 +50,8 @@ fn main() {
         "preload.rs",
         "cache_core.rs",
         "decision_core.rs",
+        "filenames_core.rs",
+        "lock_core.rs",
         "project_roots_core.rs",
         "btrfs_core.rs",
         "xdg_core.rs",

@@ -6,12 +6,35 @@
 use std::path::Path;
 
 use crate::atomic_write::write_atomically;
-use crate::{cache, merge};
+use crate::{cache, filenames, merge};
 
 /// Real entry point: validates roots via the actual `statfs`-based
 /// check. See `reload_with_validator` for the testable core.
 pub fn reload(config_dir: &Path, cache_path: &Path) -> anyhow::Result<()> {
     reload_with_validator(config_dir, cache_path, crate::btrfs::is_btrfs)
+}
+
+/// Blocking-locks `<data_dir>/reload.lock` for the whole
+/// read-merge-validate-write sequence below (ai-work/tasks/atomic-file-io.plan.md
+/// §1), fully serializing concurrent `reload`/`scan --save` runs rather
+/// than just avoiding the byte-level temp-file corruption `atomic_write`
+/// already prevents on its own. `cache_path`'s parent is always the
+/// data dir in every real caller (`main.rs` always constructs it as
+/// `data_dir.join(COMPILED_CACHE_FILE_NAME)`) - deriving it here avoids
+/// adding a `data_dir` parameter nothing else in this function needs.
+/// Returns the held `File` - the caller keeps it alive for as long as
+/// the lock should be held; dropping it releases the lock.
+fn lock_for_reload(cache_path: &Path) -> anyhow::Result<std::fs::File> {
+    let data_dir = cache_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cache path {} has no parent directory",
+            cache_path.display()
+        )
+    })?;
+    let lock_path = data_dir.join(filenames::RELOAD_LOCK_FILE_NAME);
+    let lock_file = crate::lock::open_lock_file(&lock_path)?;
+    lock_file.lock()?;
+    Ok(lock_file)
 }
 
 /// Core logic with an injectable BTRFS-validator, so the merge →
@@ -22,6 +45,8 @@ fn reload_with_validator(
     cache_path: &Path,
     is_btrfs: impl Fn(&Path) -> anyhow::Result<bool>,
 ) -> anyhow::Result<()> {
+    let _lock = lock_for_reload(cache_path)?;
+
     let config = merge::load_all(config_dir)?;
 
     for root in &config.roots {
@@ -172,5 +197,39 @@ mod tests {
         let err = reload(&paths.config_dir, &paths.cache_path).unwrap_err();
         assert!(err.to_string().contains("/home/user1"));
         assert!(!paths.cache_path.exists());
+    }
+
+    #[test]
+    fn concurrent_reload_calls_serialize_via_the_reload_lock() {
+        let paths = test_paths();
+        write_config_dir(&paths.config_dir);
+
+        // Hold reload.lock ourselves first, simulating another
+        // in-flight reload - reload_with_validator must block on it
+        // rather than proceeding concurrently.
+        let data_dir = paths.cache_path.parent().unwrap();
+        std::fs::create_dir_all(data_dir).unwrap();
+        let lock_path = data_dir.join(filenames::RELOAD_LOCK_FILE_NAME);
+        let lock_file = crate::lock::open_lock_file(&lock_path).unwrap();
+        lock_file.lock().unwrap();
+
+        let config_dir = paths.config_dir.clone();
+        let cache_path = paths.cache_path.clone();
+        let handle = std::thread::spawn(move || {
+            reload_with_validator(&config_dir, &cache_path, |_| Ok(true)).unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "reload_with_validator should still be blocked while the lock is held"
+        );
+
+        drop(lock_file);
+        handle.join().unwrap();
+        assert_eq!(
+            fs::read_to_string(&paths.cache_path).unwrap(),
+            "/home/user1\tnode_modules\n"
+        );
     }
 }

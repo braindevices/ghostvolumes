@@ -12,9 +12,20 @@ fn help_lists_all_subcommands() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("discover"))
         .stdout(predicate::str::contains("convert"))
-        .stdout(predicate::str::contains("register"))
+        .stdout(predicate::str::contains("projects"))
         .stdout(predicate::str::contains("intercept"))
         .stdout(predicate::str::contains("shell-init"));
+}
+
+#[test]
+fn projects_help_lists_list_register_and_unregister() {
+    let mut cmd = Command::cargo_bin("ghostvolumes").unwrap();
+    cmd.args(["projects", "--help"]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("register"))
+        .stdout(predicate::str::contains("unregister"));
 }
 
 #[test]

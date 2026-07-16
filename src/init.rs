@@ -23,8 +23,11 @@ const DEFAULT_WATCHED: &str = r#"names = [
     "node_modules",
     "target",
     ".venv",
-    ".cache",
     "build",
+    ".cache",
+    ".uv-cache",
+    ".ruff_cache",
+    ".pytest_cache",
 ]
 "#;
 
@@ -109,7 +112,16 @@ mod tests {
         let parsed = crate::config::parse_watched(&text).unwrap();
         assert_eq!(
             parsed.names,
-            vec!["node_modules", "target", ".venv", "build"]
+            vec![
+                "node_modules",
+                "target",
+                ".venv",
+                "build",
+                ".cache",
+                ".uv-cache",
+                ".ruff_cache",
+                ".pytest_cache"
+            ]
         );
     }
 

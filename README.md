@@ -44,7 +44,9 @@ See [design.md](design.md) for the full rationale behind this model.
 | `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d`/`watched.d` |
 | `ghostvolumes discover [PATH] [--max-depth N] [--save]` | Find subvolumes that already exist and suggest decision-file lines |
 | `ghostvolumes convert <path> [--max-depth N]` | Recursively convert subvolume candidates, prompting to remember decisions |
-| `ghostvolumes register <path>` | Register a project root (usually automatic via `convert`) |
+| `ghostvolumes projects list` | List registered project roots, flagging any that no longer exist |
+| `ghostvolumes projects register <path>` | Register a project root (usually automatic via `convert`) |
+| `ghostvolumes projects unregister [path]` | Remove a project root; with no path, scan and interactively prune stale ones |
 | `ghostvolumes intercept -- <cmd>` | Run `<cmd>` with the shim active, converting anything with a recorded `+` decision |
 | `ghostvolumes init` | Install the shim and default config (idempotent, safe to re-run) |
 | `ghostvolumes shell-init <bash\|zsh>` | Print the `LD_PRELOAD` value `intercept` uses (diagnostic only) |
@@ -56,7 +58,7 @@ Global config lives under `~/.config/ghostvolumes/`:
 ```
 roots.d/00-auto.toml       # written by `scan --save` — regenerated, don't hand-edit
 roots.d/10-local.toml      # hand-edited additions (e.g. roots scan couldn't find)
-watched.d/00-defaults.toml # ships with the package: node_modules, target, .venv, build
+watched.d/00-defaults.toml # ships with the package: node_modules, target, .venv, .cache, build
 watched.d/10-local.toml    # hand-edited global additions
 ```
 
@@ -83,7 +85,9 @@ Resolution walking up from a candidate: the closest enclosing file with a matchi
 
 ### The project-roots list
 
-A plain-text file (`project-roots.txt` under the XDG data directory, one path per line) telling the shim where to stop walking up when resolving decisions. `convert` registers this automatically; `ghostvolumes register <path>` sets it up by hand ahead of time if needed.
+A plain-text file (`project-roots.list` under the XDG data directory, one path per line) telling the shim where to stop walking up when resolving decisions. `convert` registers this automatically; `ghostvolumes projects register <path>` sets it up by hand ahead of time if needed.
+
+This is genuine, persistent user data (unlike the disposable, regenerate-anytime `compiled.tsv`), so backing it up or syncing it across machines (a dotfile manager, a disk migration) is fine. Just don't hand-edit it directly — use `ghostvolumes projects register`/`unregister` instead, so a live edit never races the shim's or CLI's own reads and writes of it. Run `ghostvolumes projects unregister` (no path) any time to interactively prune entries that no longer exist, including ones that arrived already-stale via a synced/copied-in list. `ghostvolumes projects list` shows what's currently registered.
 
 ## Debugging
 

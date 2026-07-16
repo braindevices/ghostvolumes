@@ -45,3 +45,16 @@ pub const AUTO_ROOTS_FILE_NAME: &str = "00-auto.toml";
 
 /// `init`'s default-watched-names skeleton, within `WATCHED_D_DIR`.
 pub const DEFAULT_WATCHED_FILE_NAME: &str = "00-defaults.toml";
+
+/// Guards `reload()`/`scan --save`'s whole read-merge-validate-write
+/// sequence (ai-work/tasks/atomic-file-io.plan.md §1) — CLI-only, since
+/// the shim never writes `compiled.tsv`/`roots.d`. Wired in at plan
+/// Step 3.
+#[allow(dead_code)]
+pub const RELOAD_LOCK_FILE_NAME: &str = "reload.lock";
+
+/// Guards `projects register`/`unregister`'s read-modify-write sequence
+/// on the project-roots list (§5) — CLI-only, since the shim never
+/// writes it. Wired in at plan Step 6.
+#[allow(dead_code)]
+pub const PROJECT_ROOTS_LOCK_FILE_NAME: &str = "project-roots.lock";

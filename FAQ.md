@@ -42,7 +42,7 @@ Write a `- name` (or `- /exact/path`) line to the decision file yourself, or ans
 
 ## Why not just export `LD_PRELOAD` globally?
 
-`ghostvolumes shell-init <shell>` still prints a valid `export LD_PRELOAD=...` line, but it's a diagnostic/reference tool, not something to `eval` into your rc file. Sourcing it there means every process your shell spawns inherits `LD_PRELOAD` — including every `ghostvolumes` subcommand itself (`intercept`, `convert`, `register`, ...), not just the build you meant to wrap. That breaks `intercept`'s own invariant that the shim only ever loads into the child, never the parent, and makes `intercept` mostly redundant besides its post-run notice. See [design.md](design.md#key-decisions-and-why) for the full mechanism.
+`ghostvolumes shell-init <shell>` still prints a valid `export LD_PRELOAD=...` line, but it's a diagnostic/reference tool, not something to `eval` into your rc file. Sourcing it there means every process your shell spawns inherits `LD_PRELOAD` — including every `ghostvolumes` subcommand itself (`intercept`, `convert`, `projects`, ...), not just the build you meant to wrap. That breaks `intercept`'s own invariant that the shim only ever loads into the child, never the parent, and makes `intercept` mostly redundant besides its post-run notice. See [design.md](design.md#key-decisions-and-why) for the full mechanism.
 
 If you want whole-session coverage instead of wrapping each command individually, open a deliberate wrapped subshell:
 

@@ -24,13 +24,14 @@
 //!
 //! Whenever a decision actually gets recorded above, the resolved
 //! project root also gets silently, idempotently registered into the
-//! project-roots list (§3) — the same effect `register` has, but free.
+//! project-roots list (§3) — the same effect `projects register` has,
+//! but free.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{btrfs, cache, decision, filenames, project_roots, register};
+use crate::{btrfs, cache, decision, filenames, project_roots, projects};
 
 enum RememberChoice {
     No,
@@ -92,7 +93,11 @@ fn confirm_override(
     }
 }
 
-fn read_stdin_line() -> Option<String> {
+/// `pub(crate)` rather than private - `projects::unregister`'s
+/// auto-scan-and-prune mode reuses this exact injectable-stdin-reader
+/// shape (see `ask_remember`/`confirm_override` above) rather than
+/// duplicating it.
+pub(crate) fn read_stdin_line() -> Option<String> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).ok()?;
     Some(line)
@@ -163,12 +168,15 @@ fn append_decision(boundary: &Path, line: &str) -> anyhow::Result<()> {
         .create(true)
         .append(true)
         .open(&file_path)?;
-    writeln!(file, "{line}")?;
+    // One write_all call for the whole line - see projects.rs's
+    // identical fix for why writeln! isn't safe against a concurrent
+    // appender (ai-work/tasks/atomic-file-io.plan.md §3).
+    file.write_all(format!("{line}\n").as_bytes())?;
     Ok(())
 }
 
 /// Idempotently registers `boundary` into the project-roots list (§3),
-/// both on disk (via `register::register`, so later `convert`/shim
+/// both on disk (via `projects::register`, so later `convert`/shim
 /// invocations see it too) and in the in-memory `project_roots` list
 /// (so later candidates *within this same run* see it without a second
 /// disk read).
@@ -181,7 +189,7 @@ fn register_project_root(
     if !project_roots.iter().any(|r| r == &boundary_str) {
         project_roots.push(boundary_str.clone());
     }
-    register::register(project_roots_path, &boundary_str)
+    projects::register(project_roots_path, &boundary_str)
 }
 
 fn maybe_ask_and_record(
@@ -223,8 +231,18 @@ fn create_empty(target: &Path) -> anyhow::Result<()> {
         .to_string_lossy()
         .into_owned();
     std::fs::create_dir_all(parent)?;
-    btrfs::create_subvolume(parent, &name)?;
-    Ok(())
+    // AlreadyExists is tolerated, not propagated - materialize()'s own
+    // lock (ai-work/tasks/atomic-file-io.plan.md §6/§7) makes this rare
+    // (the shim can't be mid-creation while this lock is held), but the
+    // shim could still have won a race and created it just before this
+    // call took the lock. Either way the desired end state - target is
+    // a subvolume - already holds, matching the shim's own
+    // try_create_subvolume tolerance for the identical race.
+    match btrfs::create_subvolume(parent, &name) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Creates a new subvolume at a temp sibling path, `cp -a
@@ -280,7 +298,22 @@ fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn materialize(target: &Path) -> anyhow::Result<()> {
+/// Blocking-locks `boundary`'s per-project lock file
+/// (ai-work/tasks/atomic-file-io.plan.md §6) around the create/copy
+/// /rename sequence below - coordinates with the shim's own
+/// `try_create_subvolume`, which takes the same lock (non-blocking)
+/// before creating a subvolume for any candidate under this same
+/// boundary. Blocking is fine here (unlike the shim): `convert` is an
+/// explicit, occasional, human-run command, not something injected
+/// into an arbitrary intercepted call. Held only around this
+/// operation, not the interactive "remember this?" prompt that runs
+/// before it - that could take arbitrarily long, and there's no need
+/// to hold the lock while waiting on a human.
+fn materialize(target: &Path, boundary: &Path, data_dir: &Path) -> anyhow::Result<()> {
+    let lock_path = crate::lock::boundary_lock_path(&data_dir.join(filenames::LOCKS_DIR), boundary);
+    let lock_file = crate::lock::open_lock_file(&lock_path)?;
+    lock_file.lock()?;
+
     if target.exists() {
         copy_and_swap(target)
     } else {
@@ -348,6 +381,7 @@ fn resolve_candidate(
     rows: &[(String, String)],
     project_roots: &mut Vec<String>,
     project_roots_path: &Path,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     if btrfs::is_subvolume(candidate).unwrap_or(false) {
         return Ok(());
@@ -362,7 +396,7 @@ fn resolve_candidate(
     );
 
     match existing_decision {
-        Some(true) => materialize(candidate),
+        Some(true) => materialize(candidate, &boundary, data_dir),
         Some(false) => {
             if candidate != top_level_path {
                 return Ok(()); // found via the walk, not named explicitly - skip silently
@@ -370,11 +404,11 @@ fn resolve_candidate(
             if !confirm_override(candidate, std::io::stdin().is_terminal(), read_stdin_line) {
                 return Ok(());
             }
-            materialize(candidate)?;
+            materialize(candidate, &boundary, data_dir)?;
             maybe_ask_and_record(candidate, &boundary, project_roots, project_roots_path)
         }
         None => {
-            materialize(candidate)?;
+            materialize(candidate, &boundary, data_dir)?;
             maybe_ask_and_record(candidate, &boundary, project_roots, project_roots_path)
         }
     }
@@ -385,6 +419,7 @@ pub fn convert(
     max_depth: Option<u32>,
     cache_path: &Path,
     project_roots_path: &Path,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     if path.exists() && !path.is_dir() {
         anyhow::bail!("{} is not a directory", path.display());
@@ -410,6 +445,7 @@ pub fn convert(
             &rows,
             &mut project_roots,
             project_roots_path,
+            data_dir,
         )?;
     }
     Ok(())
@@ -564,6 +600,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -591,6 +628,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -613,6 +651,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
         assert!(btrfs::is_subvolume(&target).unwrap());
@@ -629,8 +668,25 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
+        assert!(btrfs::is_subvolume(&target).unwrap());
+    }
+
+    #[test]
+    fn create_empty_tolerates_a_target_that_already_exists() {
+        // Simulates the shim winning a race and creating the subvolume
+        // just before convert's own materialize() call took the lock
+        // (ai-work/tasks/atomic-file-io.plan.md §7) - create_empty
+        // itself (unlike resolve_candidate's own upfront is_subvolume
+        // check) must tolerate this rather than erroring, since the
+        // desired end state already holds.
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("node_modules");
+        btrfs::create_subvolume(scratch.path(), "node_modules").unwrap();
+
+        create_empty(&target).unwrap();
         assert!(btrfs::is_subvolume(&target).unwrap());
     }
 
@@ -646,6 +702,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
         assert!(btrfs::is_subvolume(&target).unwrap());
@@ -663,6 +720,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("not a directory"));
@@ -684,6 +742,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -704,6 +763,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -733,6 +793,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -762,6 +823,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -788,6 +850,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -808,6 +871,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -832,6 +896,7 @@ mod tests {
             None,
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
+            cache_dir.path(),
         )
         .unwrap();
 
@@ -846,5 +911,41 @@ mod tests {
             text.push_str(&format!("{}\t{name}\n", prefix.display()));
         }
         std::fs::write(cache_path, text).unwrap();
+    }
+
+    #[test]
+    fn materialize_blocks_while_the_boundary_lock_is_held_then_succeeds() {
+        // The CLI-side half of the shim-vs-convert directory-swap lock
+        // (ai-work/tasks/atomic-file-io.plan.md §6): unlike the shim's
+        // own non-blocking try_lock, materialize blocks - fine here,
+        // since convert is an explicit, occasional, human-run command.
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("node_modules");
+        let cache_dir = empty_cache();
+        let boundary = scratch.path().to_path_buf();
+
+        let lock_path = crate::lock::boundary_lock_path(
+            &cache_dir.path().join(filenames::LOCKS_DIR),
+            &boundary,
+        );
+        let lock_file = crate::lock::open_lock_file(&lock_path).unwrap();
+        lock_file.lock().unwrap();
+
+        let target_thread = target.clone();
+        let boundary_thread = boundary.clone();
+        let data_dir = cache_dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            materialize(&target_thread, &boundary_thread, &data_dir).unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "materialize should still be blocked while the lock is held"
+        );
+
+        drop(lock_file);
+        handle.join().unwrap();
+        assert!(btrfs::is_subvolume(&target).unwrap());
     }
 }
