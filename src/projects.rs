@@ -37,10 +37,18 @@ fn lock_project_roots(list_path: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
+    // Normalized once here (not just at `needs_append`'s comparison) so
+    // the on-disk file itself never gains a new trailing-slash entry
+    // going forward, not just a normalized-on-read view of an old one -
+    // `path` is a raw, unvalidated CLI arg (`ProjectsAction::Register`),
+    // and shell tab-completion routinely appends a trailing slash for a
+    // directory.
+    let path = crate::project_roots::normalize_root_path(path);
+
     let _lock = lock_project_roots(list_path)?;
 
     let existing = std::fs::read_to_string(list_path).unwrap_or_default();
-    if !crate::project_roots::needs_append(&existing, path) {
+    if !crate::project_roots::needs_append(&existing, &path) {
         return Ok(());
     }
     if let Some(parent) = list_path.parent() {
@@ -89,18 +97,27 @@ fn unregister_with_io(
     let _lock = lock_project_roots(list_path)?;
 
     let existing = std::fs::read_to_string(list_path).unwrap_or_default();
-    let entries: Vec<&str> = existing.lines().collect();
+    // Reading back through `parse` (not raw `.lines()`) means every
+    // entry is already slash-normalized before comparison - an
+    // explicit `path` typed with (or without) a trailing slash still
+    // matches a stored entry that differs only in that. As a side
+    // effect, this rewrite also normalizes every *other* entry already
+    // in the file, regardless of which one was targeted.
+    let entries = crate::project_roots::parse(&existing);
 
-    let to_keep: Vec<&str> = match path {
-        Some(target) => entries
-            .into_iter()
-            .filter(|entry| *entry != target)
-            .collect(),
+    let to_keep: Vec<String> = match path {
+        Some(target) => {
+            let target = crate::project_roots::normalize_root_path(target);
+            entries
+                .into_iter()
+                .filter(|entry| *entry != target)
+                .collect()
+        }
         None => {
             let mut keep = Vec::new();
             for entry in entries {
-                let still_exists = Path::new(entry).is_dir();
-                if still_exists || !confirm_unregister(entry, is_tty, &mut read_line) {
+                let still_exists = Path::new(&entry).is_dir();
+                if still_exists || !confirm_unregister(&entry, is_tty, &mut read_line) {
                     keep.push(entry);
                 }
             }
@@ -132,9 +149,12 @@ fn confirm_unregister(
 /// read-only, no lock needed. Backs `ghostvolumes projects list`.
 pub fn list_projects(list_path: &Path) -> Vec<(String, bool)> {
     let existing = std::fs::read_to_string(list_path).unwrap_or_default();
-    existing
-        .lines()
-        .map(|entry| (entry.to_string(), Path::new(entry).is_dir()))
+    crate::project_roots::parse(&existing)
+        .into_iter()
+        .map(|entry| {
+            let exists = Path::new(&entry).is_dir();
+            (entry, exists)
+        })
         .collect()
 }
 
@@ -179,6 +199,52 @@ mod tests {
         register(&list_path, "/a").unwrap();
         register(&list_path, "/b").unwrap();
         assert_eq!(std::fs::read_to_string(&list_path).unwrap(), "/a\n/b\n");
+    }
+
+    #[test]
+    fn register_strips_a_trailing_slash_before_writing() {
+        // Shell tab-completion routinely appends one for a directory
+        // argument - the raw CLI arg must not land in the file as-is.
+        let (_dir, list_path) = temp_list_path();
+        register(&list_path, "/home/user1/projects/app/").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&list_path).unwrap(),
+            "/home/user1/projects/app\n"
+        );
+    }
+
+    #[test]
+    fn register_is_idempotent_regardless_of_trailing_slash_on_either_side() {
+        let (_dir, list_path) = temp_list_path();
+        register(&list_path, "/a").unwrap();
+        register(&list_path, "/a/").unwrap();
+        assert_eq!(std::fs::read_to_string(&list_path).unwrap(), "/a\n");
+    }
+
+    #[test]
+    fn unregister_removes_an_entry_regardless_of_trailing_slash_on_either_side() {
+        let (_dir, list_path) = temp_list_path();
+        std::fs::write(&list_path, "/a/\n/b\n").unwrap();
+
+        unregister_with_io(&list_path, Some("/a"), false, || {
+            panic!("must not prompt for an explicit path")
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&list_path).unwrap(), "/b\n");
+    }
+
+    #[test]
+    fn list_projects_normalizes_a_trailing_slash() {
+        let (_dir, list_path) = temp_list_path();
+        std::fs::write(&list_path, "/a/\n/b\n").unwrap();
+
+        let listed = list_projects(&list_path);
+
+        assert_eq!(
+            listed,
+            vec![("/a".to_string(), false), ("/b".to_string(), false)]
+        );
     }
 
     #[test]

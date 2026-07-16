@@ -50,17 +50,19 @@ fn reload_with_validator(
     let config = merge::load_all(config_dir)?;
 
     for root in &config.roots {
-        let root_path = Path::new(root);
+        let root_path = Path::new(&root.path);
         let backed_by_btrfs = is_btrfs(root_path).map_err(|e| {
             anyhow::anyhow!(
-                "configured root {root} could not be checked ({e}) — config is stale; \
-                 re-run `ghostvolumes scan --save` or fix roots.d manually"
+                "configured root {} could not be checked ({e}) — config is stale; \
+                 re-run `ghostvolumes scan --save` or fix roots.d manually",
+                root.path
             )
         })?;
         if !backed_by_btrfs {
             anyhow::bail!(
-                "configured root {root} is not BTRFS-backed — config is stale; \
-                 re-run `ghostvolumes scan --save` or fix roots.d manually"
+                "configured root {} is not BTRFS-backed — config is stale; \
+                 re-run `ghostvolumes scan --save` or fix roots.d manually",
+                root.path
             );
         }
     }
@@ -107,17 +109,16 @@ mod tests {
 
     fn write_config_dir(dir: &Path) {
         fs::create_dir_all(dir.join(filenames::ROOTS_D_DIR)).unwrap();
-        fs::create_dir_all(dir.join(filenames::WATCHED_D_DIR)).unwrap();
         fs::write(
             dir.join(filenames::ROOTS_D_DIR)
                 .join(filenames::AUTO_ROOTS_FILE_NAME),
-            r#"roots = ["/home/user1"]"#,
+            "[\"/home/user1\"]",
         )
         .unwrap();
         fs::write(
-            dir.join(filenames::WATCHED_D_DIR)
-                .join(filenames::DEFAULT_WATCHED_FILE_NAME),
-            r#"names = ["node_modules"]"#,
+            dir.join(filenames::ROOTS_D_DIR)
+                .join(filenames::DEFAULT_WATCHES_FILE_NAME),
+            r#"default-watches = ["node_modules"]"#,
         )
         .unwrap();
     }
@@ -192,7 +193,7 @@ mod tests {
         // the only branch reachable here is the failure path — which
         // is exactly what should happen on a non-BTRFS filesystem.
         let paths = test_paths();
-        write_config_dir(&paths.config_dir); // roots = ["/home/user1"], not BTRFS here
+        write_config_dir(&paths.config_dir); // "/home/user1" root, not BTRFS here
 
         let err = reload(&paths.config_dir, &paths.cache_path).unwrap_err();
         assert!(err.to_string().contains("/home/user1"));

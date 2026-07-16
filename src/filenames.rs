@@ -36,15 +36,16 @@ include!("../shim/filenames_core.rs");
 /// `mod`-included there too.
 pub const SHIM_FILE_NAME: &str = env!("GHOSTVOLUMES_SHIM_FILE_NAME");
 
-/// `roots.d`/`watched.d` config subdirectories (§2).
+/// Config subdirectory (§2). `watched.d` was folded in — a root's watch
+/// list now lives alongside the root itself, see
+/// `ai-work/tasks/root-watch-config.plan.md`.
 pub const ROOTS_D_DIR: &str = "roots.d";
-pub const WATCHED_D_DIR: &str = "watched.d";
 
 /// `scan --save`'s auto-generated roots file, within `ROOTS_D_DIR`.
 pub const AUTO_ROOTS_FILE_NAME: &str = "00-auto.toml";
 
-/// `init`'s default-watched-names skeleton, within `WATCHED_D_DIR`.
-pub const DEFAULT_WATCHED_FILE_NAME: &str = "00-defaults.toml";
+/// `init`'s default-watches skeleton, within `ROOTS_D_DIR`.
+pub const DEFAULT_WATCHES_FILE_NAME: &str = "00-defaults.toml";
 
 /// Guards `reload()`/`scan --save`'s whole read-merge-validate-write
 /// sequence (ai-work/tasks/atomic-file-io.plan.md §1) — CLI-only, since

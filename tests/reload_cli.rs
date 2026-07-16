@@ -47,7 +47,7 @@ fn reload_with_non_btrfs_root_fails_with_clear_message() {
     fs::create_dir_all(config_dir.join(ROOTS_D_DIR)).unwrap();
     fs::write(
         config_dir.join(ROOTS_D_DIR).join(AUTO_ROOTS_FILE_NAME),
-        format!(r#"roots = ["{}"]"#, home.path().display()),
+        format!("[\"{}\"]", home.path().display()),
     )
     .unwrap();
 

@@ -13,14 +13,37 @@
 // Plain `//` comments, not `//!`/`///`: this file gets spliced
 // mid-file into src/project_roots.rs via `include!`.
 
+/// Strips a single trailing `/` from `path` — except when `path` is
+/// exactly `"/"`, which must keep it — so the same physical directory
+/// always compares and displays identically regardless of whether it
+/// was registered with or without a trailing slash. Shell
+/// tab-completion routinely appends one for a directory argument
+/// (`projects register`'s `path: String` is a raw, unvalidated CLI
+/// arg); `convert`'s own `Path::display()`-derived boundaries never do
+/// — the exact mismatch that left `projects list` showing some entries
+/// with a trailing slash and some without.
+#[allow(dead_code)]
+pub fn normalize_root_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Parses the file's raw text into its list of registered paths - one
-/// non-empty, trimmed line each.
+/// non-empty, trimmed, slash-normalized line each. Normalizing here
+/// (not just at the point of writing) means every reader — including
+/// `list_projects`, the shim's own boundary lookup, and an
+/// already-on-disk file written before this normalization existed —
+/// sees a consistent view without needing the raw file itself rewritten.
 #[allow(dead_code)]
 pub fn parse(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(str::to_string)
+        .map(normalize_root_path)
         .collect()
 }
 
@@ -33,7 +56,8 @@ pub fn parse(text: &str) -> Vec<String> {
 /// is not).
 #[allow(dead_code)]
 pub fn needs_append(text: &str, path: &str) -> bool {
-    !parse(text).iter().any(|existing| existing == path)
+    let normalized = normalize_root_path(path);
+    !parse(text).iter().any(|existing| existing == &normalized)
 }
 
 #[cfg(test)]
@@ -76,5 +100,40 @@ mod tests {
     #[test]
     fn needs_append_true_for_empty_file() {
         assert!(needs_append("", "/a"));
+    }
+
+    #[test]
+    fn normalize_root_path_strips_a_trailing_slash() {
+        assert_eq!(normalize_root_path("/foo/bar/"), "/foo/bar");
+        assert_eq!(normalize_root_path("/foo/bar///"), "/foo/bar");
+    }
+
+    #[test]
+    fn normalize_root_path_leaves_a_path_with_no_trailing_slash_alone() {
+        assert_eq!(normalize_root_path("/foo/bar"), "/foo/bar");
+    }
+
+    #[test]
+    fn normalize_root_path_keeps_the_bare_root_as_a_single_slash() {
+        assert_eq!(normalize_root_path("/"), "/");
+        assert_eq!(normalize_root_path("///"), "/");
+    }
+
+    #[test]
+    fn parse_normalizes_a_trailing_slash_on_every_line() {
+        let text = "/home/user1/projects/app/\n/data/workspaces/other\n";
+        assert_eq!(
+            parse(text),
+            vec![
+                "/home/user1/projects/app".to_string(),
+                "/data/workspaces/other".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn needs_append_recognizes_a_stored_path_regardless_of_trailing_slash_on_either_side() {
+        assert!(!needs_append("/a\n", "/a/"));
+        assert!(!needs_append("/a/\n", "/a"));
     }
 }

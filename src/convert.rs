@@ -3,11 +3,21 @@
 //! `<path>` is a starting point: every candidate under it matching a
 //! watched name under a configured root gets resolved too (reusing
 //! `discover`'s tree-walking conventions — skip `.git`, optional
-//! `--max-depth`, never descend into a match). `<path>` itself is
-//! always a candidate regardless of whether it matches (that's the
-//! whole point of naming it explicitly), and is created directly as a
-//! fresh, empty subvolume if it doesn't exist yet at all — this is
-//! what replaces cd-hook's old proactive pre-creation entirely.
+//! `--max-depth`, never descend into a match).
+//!
+//! `<path>` itself is exempt from the watched-name filter — treated as
+//! a candidate regardless of whether it matches — only when there's no
+//! existing content at stake: missing entirely (created directly as a
+//! fresh, empty subvolume, replacing cd-hook's old proactive
+//! pre-creation) or an empty directory. Once `<path>` already has real
+//! content, it needs the *same* "is this actually a recognized
+//! build-artifact name" signal every nested candidate already requires
+//! — naming a path explicitly on the command line isn't, by itself, enough
+//! justification to fold an entire populated directory (e.g. a project
+//! root someone pointed `convert` at to bootstrap decisions for what's
+//! *inside* it) into a subvolume and lose snapshot coverage for
+//! everything in it. It's still scanned as the walk's starting point
+//! either way — only its own self-materialization is gated.
 //!
 //! Each candidate, resolved shallowest-first (so an "every match of
 //! this name" answer for a shallow candidate is already reflected by
@@ -185,7 +195,12 @@ fn register_project_root(
     project_roots: &mut Vec<String>,
     project_roots_path: &Path,
 ) -> anyhow::Result<()> {
-    let boundary_str = boundary.display().to_string();
+    // `Path::display()` essentially never produces a trailing slash on
+    // its own, but normalizing here too keeps this in-memory list (used
+    // for this same run's own dedup checks) consistent with whatever
+    // `projects::register` writes to disk, rather than relying on that
+    // being incidentally true.
+    let boundary_str = crate::project_roots::normalize_root_path(&boundary.display().to_string());
     if !project_roots.iter().any(|r| r == &boundary_str) {
         project_roots.push(boundary_str.clone());
     }
@@ -375,6 +390,36 @@ fn find_nested_candidates_inner(
     }
 }
 
+/// `true` for a not-yet-existing or empty directory — nothing to lose
+/// either way, so `<path>` stays exempt from the watched-name filter in
+/// that case (see the module doc comment). A candidate the walk found
+/// on its own is never checked against this — only `<path>` itself ever
+/// needs it, since the walk already only ever finds watched-name
+/// matches in the first place.
+fn is_unpopulated(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// `true` if `candidate`'s own name is a watched name at its own
+/// location — the same check `find_nested_candidates_inner` already
+/// applies to every nested candidate, reused here so `<path>` itself
+/// gets no special exemption once it has real content (see the module
+/// doc comment).
+fn matches_a_watched_name(candidate: &Path, rows: &[(String, String)]) -> bool {
+    let Some(parent) = candidate.parent() else {
+        return false;
+    };
+    let name = candidate
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    cache::names_for(rows, parent).contains(&name)
+}
+
 fn resolve_candidate(
     candidate: &Path,
     top_level_path: &Path,
@@ -408,6 +453,16 @@ fn resolve_candidate(
             maybe_ask_and_record(candidate, &boundary, project_roots, project_roots_path)
         }
         None => {
+            if candidate == top_level_path
+                && !is_unpopulated(candidate)
+                && !matches_a_watched_name(candidate, rows)
+            {
+                // Real content, unrecognized name - not fair game just
+                // because it was named explicitly (see module doc
+                // comment). Still scanned as the walk's starting point;
+                // only its own self-materialization is skipped.
+                return Ok(());
+            }
             materialize(candidate, &boundary, data_dir)?;
             maybe_ask_and_record(candidate, &boundary, project_roots, project_roots_path)
         }
@@ -594,6 +649,10 @@ mod tests {
         std::fs::write(target.join("pkg/index.js"), b"module.exports = {}").unwrap();
         std::fs::write(target.join("top-level.txt"), b"hello").unwrap();
         let cache_dir = empty_cache();
+        // Already populated, so it needs a recognized name to
+        // self-materialize (see resolve_candidate's None arm) - an
+        // empty cache wouldn't recognize "node_modules" here otherwise.
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
 
         convert(
             &target,
@@ -876,6 +935,61 @@ mod tests {
         .unwrap();
 
         assert!(btrfs::is_subvolume(&nested).unwrap());
+    }
+
+    #[test]
+    fn a_populated_project_root_argument_is_left_alone_but_still_walked_for_nested_matches() {
+        // The bug this guards against: pointing `convert` at an
+        // already-populated project root (e.g. to bootstrap decisions
+        // for what's inside it) must not fold the whole project itself
+        // into a subvolume just because it was named explicitly -
+        // "project" isn't a recognized build-artifact name anywhere,
+        // unlike the nested "node_modules" match.
+        let scratch = btrfs_scratch_dir();
+        let project = scratch.path().join("project");
+        let nested = project.join("packages/foo/node_modules");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(project.join("README.md"), b"real project content").unwrap();
+        let cache_dir = empty_cache();
+        write_cache_rows(&cache_path(&cache_dir), &[(&project, "node_modules")]);
+
+        convert(
+            &project,
+            None,
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert!(!btrfs::is_subvolume(&project).unwrap());
+        assert_eq!(
+            std::fs::read(project.join("README.md")).unwrap(),
+            b"real project content"
+        );
+        assert!(btrfs::is_subvolume(&nested).unwrap());
+    }
+
+    #[test]
+    fn an_empty_or_missing_top_level_path_still_self_materializes_with_an_unrecognized_name() {
+        // The exemption for cd-hook-replacement pre-creation must
+        // survive: nothing to lose either way, so an unrecognized name
+        // is fine when there's no existing content at stake.
+        let scratch = btrfs_scratch_dir();
+        let empty_project = scratch.path().join("brand-new-project");
+        std::fs::create_dir_all(&empty_project).unwrap();
+        let cache_dir = empty_cache();
+
+        convert(
+            &empty_project,
+            None,
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert!(btrfs::is_subvolume(&empty_project).unwrap());
     }
 
     #[test]

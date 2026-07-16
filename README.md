@@ -41,7 +41,7 @@ See [design.md](design.md) for the full rationale behind this model.
 | Command | What it does |
 |---|---|
 | `ghostvolumes scan [--save]` | Detect BTRFS snapshot-managed roots |
-| `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d`/`watched.d` |
+| `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d` |
 | `ghostvolumes discover [PATH] [--max-depth N] [--save]` | Find subvolumes that already exist and suggest decision-file lines |
 | `ghostvolumes convert <path> [--max-depth N]` | Recursively convert subvolume candidates, prompting to remember decisions |
 | `ghostvolumes projects list` | List registered project roots, flagging any that no longer exist |
@@ -53,14 +53,31 @@ See [design.md](design.md) for the full rationale behind this model.
 
 ## Configuration
 
-Global config lives under `~/.config/ghostvolumes/`:
+Global config lives under `~/.config/ghostvolumes/roots.d/`:
 
 ```
-roots.d/00-auto.toml       # written by `scan --save` — regenerated, don't hand-edit
-roots.d/10-local.toml      # hand-edited additions (e.g. roots scan couldn't find)
-watched.d/00-defaults.toml # ships with the package: node_modules, target, .venv, .cache, build
-watched.d/10-local.toml    # hand-edited global additions
+roots.d/00-auto.toml     # written by `scan --save` — regenerated, don't hand-edit
+roots.d/00-defaults.toml # ships with the package: default-watches = node_modules, target, .venv, .cache, build
+roots.d/10-local.toml    # hand-edited: extra roots, per-root overrides, disabling a root
 ```
+
+Every `*.toml` file in `roots.d/` is merged in sorted-filename order,
+**last file wins per field** (no unions) — a root path gets its own
+table, with an optional `enabled` (default `true`) and `watches`
+(replaces, not adds to, `default-watches` for that root):
+
+```toml
+default-watches = ["node_modules", "target", ".venv", "build"]
+
+["/home/user/some-project"]
+watches = ["node_modules", "dist"]   # this root only watches these two
+
+["/mnt/noisy-backup-drive"]
+enabled = false                      # scan --save keeps finding this root; suppress it
+```
+
+A disabled root doesn't cascade to any other root nested under its
+path — each root path is its own independent entry.
 
 ### Decision files
 

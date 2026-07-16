@@ -19,7 +19,7 @@ const PRELOAD_SO: &[u8] = include_bytes!(concat!(
     env!("GHOSTVOLUMES_SHIM_FILE_NAME")
 ));
 
-const DEFAULT_WATCHED: &str = r#"names = [
+const DEFAULT_WATCHES: &str = r#"default-watches = [
     "node_modules",
     "target",
     ".venv",
@@ -35,14 +35,12 @@ pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     std::fs::write(data_dir.join(filenames::SHIM_FILE_NAME), PRELOAD_SO)?;
 
-    for sub in [filenames::ROOTS_D_DIR, filenames::WATCHED_D_DIR] {
-        std::fs::create_dir_all(config_dir.join(sub))?;
-    }
+    std::fs::create_dir_all(config_dir.join(filenames::ROOTS_D_DIR))?;
     let defaults_path = config_dir
-        .join(filenames::WATCHED_D_DIR)
-        .join(filenames::DEFAULT_WATCHED_FILE_NAME);
+        .join(filenames::ROOTS_D_DIR)
+        .join(filenames::DEFAULT_WATCHES_FILE_NAME);
     if !defaults_path.exists() {
-        std::fs::write(&defaults_path, DEFAULT_WATCHED)?;
+        std::fs::write(&defaults_path, DEFAULT_WATCHES)?;
     }
 
     Ok(())
@@ -76,8 +74,8 @@ mod tests {
 
     fn defaults_path(config_dir: &Path) -> PathBuf {
         config_dir
-            .join(filenames::WATCHED_D_DIR)
-            .join(filenames::DEFAULT_WATCHED_FILE_NAME)
+            .join(filenames::ROOTS_D_DIR)
+            .join(filenames::DEFAULT_WATCHES_FILE_NAME)
     }
 
     #[test]
@@ -92,49 +90,56 @@ mod tests {
     }
 
     #[test]
-    fn creates_config_dot_d_directories() {
+    fn creates_config_dot_d_directory() {
         let dirs = test_dirs();
 
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
-        for sub in [filenames::ROOTS_D_DIR, filenames::WATCHED_D_DIR] {
-            assert!(dirs.config_dir.join(sub).is_dir());
-        }
+        assert!(dirs.config_dir.join(filenames::ROOTS_D_DIR).is_dir());
     }
 
     #[test]
-    fn writes_default_watched_names_when_absent() {
+    fn writes_default_watches_when_absent() {
         let dirs = test_dirs();
 
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
         let text = std::fs::read_to_string(defaults_path(&dirs.config_dir)).unwrap();
-        let parsed = crate::config::parse_watched(&text).unwrap();
+        let parsed = crate::config::parse_roots(&text).unwrap();
         assert_eq!(
-            parsed.names,
-            vec![
-                "node_modules",
-                "target",
-                ".venv",
-                "build",
-                ".cache",
-                ".uv-cache",
-                ".ruff_cache",
-                ".pytest_cache"
-            ]
+            parsed.default_watches,
+            Some(
+                vec![
+                    "node_modules",
+                    "target",
+                    ".venv",
+                    "build",
+                    ".cache",
+                    ".uv-cache",
+                    ".ruff_cache",
+                    ".pytest_cache"
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
+            )
         );
     }
 
     #[test]
     fn does_not_overwrite_existing_defaults_file() {
         let dirs = test_dirs();
-        std::fs::create_dir_all(dirs.config_dir.join(filenames::WATCHED_D_DIR)).unwrap();
-        std::fs::write(defaults_path(&dirs.config_dir), "names = [\"custom\"]\n").unwrap();
+        std::fs::create_dir_all(dirs.config_dir.join(filenames::ROOTS_D_DIR)).unwrap();
+        std::fs::write(
+            defaults_path(&dirs.config_dir),
+            "default-watches = [\"custom\"]\n",
+        )
+        .unwrap();
 
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
 
         let text = std::fs::read_to_string(defaults_path(&dirs.config_dir)).unwrap();
-        assert_eq!(text, "names = [\"custom\"]\n");
+        assert_eq!(text, "default-watches = [\"custom\"]\n");
     }
 
     #[test]

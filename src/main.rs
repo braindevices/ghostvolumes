@@ -198,7 +198,7 @@ fn main() -> anyhow::Result<()> {
                 None => PathBuf::from(std::env::var("HOME")?),
             };
             let merged = merge::load_all(&config_dir)?;
-            let matches = discover::walk(&start, max_depth, &merged.global_defaults);
+            let matches = discover::walk(&start, max_depth, &merged.all_watched_names());
             let suggestions = discover::group_by_parent(matches);
             if save {
                 for s in &suggestions {

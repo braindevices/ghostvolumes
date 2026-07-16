@@ -24,12 +24,15 @@ include!("../shim/cache_core.rs");
 /// Renders the merged config into `compiled.tsv` text. Writer-only;
 /// the shim never calls this (it only reads compiled.tsv), so it stays
 /// out of `shim/cache_core.rs` and can freely depend on `MergedConfig`
-/// (serde-derived, not shim-safe).
+/// (serde-derived, not shim-safe). Each root's `watches` is already
+/// fully resolved by `merge.rs` (its own override, or `default-watches`,
+/// with disabled roots dropped already) — this just flattens the
+/// per-root lists into rows, no cross-product needed here anymore.
 pub fn compile(config: &MergedConfig) -> String {
     let mut out = String::new();
     for root in &config.roots {
-        for name in &config.global_defaults {
-            out.push_str(root);
+        for name in &root.watches {
+            out.push_str(&root.path);
             out.push('\t');
             out.push_str(name);
             out.push('\n');
@@ -41,17 +44,20 @@ pub fn compile(config: &MergedConfig) -> String {
 #[cfg(test)]
 mod compile_tests {
     use super::*;
+    use crate::merge::ResolvedRoot;
     use std::path::Path;
 
     fn sample_config() -> MergedConfig {
         MergedConfig {
-            roots: vec!["/".to_string()],
-            global_defaults: vec![
-                "node_modules".to_string(),
-                "target".to_string(),
-                ".venv".to_string(),
-                "build".to_string(),
-            ],
+            roots: vec![ResolvedRoot {
+                path: "/".to_string(),
+                watches: vec![
+                    "node_modules".to_string(),
+                    "target".to_string(),
+                    ".venv".to_string(),
+                    "build".to_string(),
+                ],
+            }],
         }
     }
 
@@ -82,8 +88,16 @@ mod compile_tests {
     #[test]
     fn restricted_roots_produce_root_keyed_rows_not_a_hardcoded_slash() {
         let config = MergedConfig {
-            roots: vec!["/home/user1".to_string(), "/data/workspaces".to_string()],
-            global_defaults: vec!["node_modules".to_string()],
+            roots: vec![
+                ResolvedRoot {
+                    path: "/home/user1".to_string(),
+                    watches: vec!["node_modules".to_string()],
+                },
+                ResolvedRoot {
+                    path: "/data/workspaces".to_string(),
+                    watches: vec!["node_modules".to_string()],
+                },
+            ],
         };
         let text = compile(&config);
         assert_eq!(
@@ -97,5 +111,23 @@ mod compile_tests {
         // though it would have matched a hardcoded "/" row.
         assert!(names_for(&rows, Path::new("/etc/somewhere/node_modules")).is_empty());
         assert!(!names_for(&rows, Path::new("/data/workspaces/app")).is_empty());
+    }
+
+    #[test]
+    fn each_root_uses_its_own_already_resolved_watch_list() {
+        let config = MergedConfig {
+            roots: vec![
+                ResolvedRoot {
+                    path: "/".to_string(),
+                    watches: vec!["node_modules".to_string()],
+                },
+                ResolvedRoot {
+                    path: "/home".to_string(),
+                    watches: vec!["dist".to_string()],
+                },
+            ],
+        };
+        let text = compile(&config);
+        assert_eq!(text, "/\tnode_modules\n/home\tdist\n");
     }
 }
