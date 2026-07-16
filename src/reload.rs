@@ -54,14 +54,14 @@ fn reload_with_validator(
         let backed_by_btrfs = is_btrfs(root_path).map_err(|e| {
             anyhow::anyhow!(
                 "configured root {} could not be checked ({e}) — config is stale; \
-                 re-run `ghostvolumes scan --save` or fix roots.d manually",
+                 re-run `ghostvolumes roots scan --save` or fix roots.d manually",
                 root.path
             )
         })?;
         if !backed_by_btrfs {
             anyhow::bail!(
                 "configured root {} is not BTRFS-backed — config is stale; \
-                 re-run `ghostvolumes scan --save` or fix roots.d manually",
+                 re-run `ghostvolumes roots scan --save` or fix roots.d manually",
                 root.path
             );
         }

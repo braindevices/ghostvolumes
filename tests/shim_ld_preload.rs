@@ -325,7 +325,7 @@ fn undecided_candidate_appends_a_pending_comment_to_the_project_decision_file() 
     assert!(!is_subvolume(&target));
 
     let decision_text = std::fs::read_to_string(decision_file_path(scratch.path())).unwrap();
-    assert_eq!(decision_text, "# /node_modules\n");
+    assert_eq!(decision_text, "? /node_modules\n");
 }
 
 #[test]

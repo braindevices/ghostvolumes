@@ -107,10 +107,11 @@ fn load_project_roots() -> Vec<String> {
 /// kept only so this never panics if that invariant ever changes.
 fn walkup_boundary(rows: &[(String, String)], target: &Path) -> PathBuf {
     let project_roots = PROJECT_ROOTS.get_or_init(load_project_roots);
-    let combined = rows
-        .iter()
-        .cloned()
-        .chain(project_roots.iter().map(|root| (root.clone(), String::new())));
+    let combined = rows.iter().cloned().chain(
+        project_roots
+            .iter()
+            .map(|root| (root.clone(), String::new())),
+    );
     let combined: Vec<(String, String)> = combined.collect();
     match cache_core::longest_matching_prefix(&combined, target) {
         Some(prefix) => PathBuf::from(prefix),
@@ -149,7 +150,13 @@ fn load_log_context() -> LogContext {
         .or_else(|| resolved_data_dir().map(|dir| dir.join(filenames_core::SHIM_LOG_FILE_NAME)));
 
     let file = log_path
-        .and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok())
+        .and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        })
         .map(Mutex::new);
 
     LogContext { file, debug }
@@ -298,40 +305,84 @@ fn decide(target: &Path) -> Decision {
         return Decision::NoCacheMatch;
     }
     let subvol_check = btrfs_core::is_subvolume(target);
-    log_debug(|| format!("{} is_subvolume() raw result -> {subvol_check:?}", target.display()));
+    log_debug(|| {
+        format!(
+            "{} is_subvolume() raw result -> {subvol_check:?}",
+            target.display()
+        )
+    });
     if subvol_check.unwrap_or(false) {
         return Decision::AlreadySubvolume;
     }
     let boundary = walkup_boundary(rows, target);
     if auto_yes_enabled() {
-        log_debug(|| format!("{} GHOSTVOLUMES_AUTO_YES set -> bypassing decision lookup", target.display()));
+        log_debug(|| {
+            format!(
+                "{} GHOSTVOLUMES_AUTO_YES set -> bypassing decision lookup",
+                target.display()
+            )
+        });
         return Decision::Accept(boundary);
     }
-    match decision_core::resolve(target, &boundary, filenames_core::DECISION_FILE_NAME, read_decision_file) {
+    match decision_core::resolve(
+        target,
+        &boundary,
+        filenames_core::DECISION_FILE_NAME,
+        read_decision_file,
+    ) {
         Some(true) => Decision::Accept(boundary),
         Some(false) => Decision::Denied,
         None => Decision::Undecided(boundary),
     }
 }
 
-/// Appends a `# <pattern>` pending-comment line (§4) to the project's
+/// Appends a `? <pattern>` pending-marker line (§4) to the project's
 /// top-level decision file at `boundary`, noting `target` as an
 /// undecided candidate — best-effort deduplicated against the file's
 /// current content, so repeated builds hitting the same undecided
 /// candidate don't pile up duplicate lines. Silently does nothing if
-/// `target` somehow isn't under `boundary`, or if the file can't be
-/// read/opened — never a hard failure path, same posture as logging.
-fn append_pending_comment(boundary: &Path, target: &Path) {
+/// `target` somehow isn't under `boundary`, the decisions lock can't be
+/// acquired (contended, or `$HOME`/`$XDG_DATA_HOME` don't resolve), or
+/// the file can't be read/opened — never a hard failure path, same
+/// posture as logging. Non-blocking, same reasoning as
+/// `try_create_subvolume`'s own lock: this runs inside an intercepted
+/// `mkdir`/`mkdirat` call, and a hang here would freeze the host build.
+///
+/// Takes its own lock (`locks/decisions/<boundary>.lock`, distinct from
+/// `try_create_subvolume`'s `locks/<boundary>.lock`) because this is a
+/// read-then-write against the same file `convert` may be concurrently
+/// rewriting in place (toggling a pending marker into a real decision)
+/// — the first read-modify-write on a decision file anywhere in this
+/// design; every other decision-file write, this one included until
+/// now, was ever only a pure append.
+fn append_pending_marker(boundary: &Path, target: &Path) {
     let Some(pattern) = decision_core::anchored_pattern(boundary, target) else {
         return;
     };
-    let file_path = boundary.join(filenames_core::DECISION_FILE_NAME);
-    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
-    if !decision_core::needs_pending_comment(&existing, &pattern) {
+    let Some(data_dir) = resolved_data_dir() else {
+        return;
+    };
+    let lock_path = lock_core::boundary_lock_path(
+        &data_dir.join(filenames_core::LOCKS_DIR).join("decisions"),
+        boundary,
+    );
+    let Ok(lock_file) = lock_core::open_lock_file(&lock_path) else {
+        return;
+    };
+    if lock_file.try_lock().is_err() {
         return;
     }
-    let line = format!("{}\n", decision_core::pending_comment_line(&pattern));
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&file_path) {
+    let file_path = boundary.join(filenames_core::DECISION_FILE_NAME);
+    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
+    if !decision_core::needs_pending_marker(&existing, &pattern) {
+        return;
+    }
+    let line = format!("{}\n", decision_core::pending_marker_line(&pattern));
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file_path)
+    {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -372,7 +423,8 @@ fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
     let Some(data_dir) = resolved_data_dir() else {
         return CreateResult::Failed;
     };
-    let lock_path = lock_core::boundary_lock_path(&data_dir.join(filenames_core::LOCKS_DIR), boundary);
+    let lock_path =
+        lock_core::boundary_lock_path(&data_dir.join(filenames_core::LOCKS_DIR), boundary);
     let Ok(lock_file) = lock_core::open_lock_file(&lock_path) else {
         return CreateResult::Failed;
     };
@@ -404,7 +456,12 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
         Decision::Accept(boundary) => match try_create_subvolume(target, &boundary) {
             CreateResult::Created => {
                 log_important(format!("{syscall}: created subvolume {}", target.display()));
-                log_debug(|| format!("{syscall} {} -> ACCEPT (created subvolume)", target.display()));
+                log_debug(|| {
+                    format!(
+                        "{syscall} {} -> ACCEPT (created subvolume)",
+                        target.display()
+                    )
+                });
                 true
             }
             CreateResult::LockContended => {
@@ -425,7 +482,12 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
             }
         },
         Decision::AlreadySubvolume => {
-            log_debug(|| format!("{syscall} {} -> SKIP (already a subvolume)", target.display()));
+            log_debug(|| {
+                format!(
+                    "{syscall} {} -> SKIP (already a subvolume)",
+                    target.display()
+                )
+            });
             false
         }
         Decision::Denied => {
@@ -437,9 +499,12 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
             // one signal a human has that a decision is waiting to be
             // made, so it can't be silent-by-default the way most
             // decide() outcomes are.
-            log_important(format!("{syscall}: undecided, skipping {}", target.display()));
+            log_important(format!(
+                "{syscall}: undecided, skipping {}",
+                target.display()
+            ));
             log_debug(|| format!("{syscall} {} -> SKIP (undecided)", target.display()));
-            append_pending_comment(&boundary, target);
+            append_pending_marker(&boundary, target);
             false
         }
         Decision::NoCacheMatch => {

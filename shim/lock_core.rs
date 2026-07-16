@@ -65,10 +65,7 @@ mod tests {
     #[test]
     fn boundary_lock_path_escapes_slashes() {
         let path = boundary_lock_path(Path::new("/data/locks"), Path::new("/home/user1/app"));
-        assert_eq!(
-            path,
-            Path::new("/data/locks/%2Fhome%2Fuser1%2Fapp.lock")
-        );
+        assert_eq!(path, Path::new("/data/locks/%2Fhome%2Fuser1%2Fapp.lock"));
     }
 
     #[test]
@@ -78,10 +75,7 @@ mod tests {
         // otherwise it could collide with, or be misread as part of,
         // the escaping scheme for `/`.
         let path = boundary_lock_path(Path::new("/data/locks"), Path::new("/home/100%done"));
-        assert_eq!(
-            path,
-            Path::new("/data/locks/%2Fhome%2F100%25done.lock")
-        );
+        assert_eq!(path, Path::new("/data/locks/%2Fhome%2F100%25done.lock"));
     }
 
     #[test]

@@ -11,7 +11,9 @@
 pub fn config_dir_from(home: &str, xdg_config_home: Option<&str>) -> std::path::PathBuf {
     match xdg_config_home {
         Some(dir) if !dir.is_empty() => std::path::Path::new(dir).join("ghostvolumes"),
-        _ => std::path::Path::new(home).join(".config").join("ghostvolumes"),
+        _ => std::path::Path::new(home)
+            .join(".config")
+            .join("ghostvolumes"),
     }
 }
 

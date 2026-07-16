@@ -188,7 +188,7 @@ torn write, not just last-write-wins). Every append-based writer
 literal/argument piece of which is its own `write()` syscall) —
 `O_APPEND` only guarantees a single `write()` call lands atomically,
 not a whole logical line assembled from several. `reload()`/
-`scan --save` (a `reload.lock`) and `projects register`/`unregister` (a
+`roots scan --save` (a `reload.lock`) and `projects register`/`unregister` (a
 `project-roots.lock`) each additionally hold a full-operation lock via
 `std::fs::File::lock()` — stable since Rust 1.89, so, unlike any
 locking crate, usable directly from the dependency-free shim too (no
@@ -287,7 +287,7 @@ fails) wherever mount privilege isn't available.
   as-yet-long-term-unproven interop job, respectively) — not required
   for merges yet.
 - `scan::save_roots()`'s own write to `roots.d/00-auto.toml` is not
-  itself under `reload.lock` (only `reload()` is) — `scan --save` calls
+  itself under `reload.lock` (only `reload()` is) — `roots scan --save` calls
   `save_roots()` then `reload()` sequentially in one process, and
   `std::fs::File` locks are per open-file-description, not per-process,
   so a naive "lock both" would have `reload()`'s own lock attempt block

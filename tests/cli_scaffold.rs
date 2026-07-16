@@ -7,7 +7,7 @@ fn help_lists_all_subcommands() {
     cmd.arg("--help");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("scan"))
+        .stdout(predicate::str::contains("roots"))
         .stdout(predicate::str::contains("reload"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("discover"))
@@ -15,6 +15,16 @@ fn help_lists_all_subcommands() {
         .stdout(predicate::str::contains("projects"))
         .stdout(predicate::str::contains("intercept"))
         .stdout(predicate::str::contains("shell-init"));
+}
+
+#[test]
+fn roots_help_lists_scan_and_list() {
+    let mut cmd = Command::cargo_bin("ghostvolumes").unwrap();
+    cmd.args(["roots", "--help"]);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("scan"))
+        .stdout(predicate::str::contains("list"));
 }
 
 #[test]

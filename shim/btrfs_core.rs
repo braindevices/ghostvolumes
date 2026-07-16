@@ -82,7 +82,11 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
     };
     args.name[..name.len()].copy_from_slice(name.as_bytes());
 
-    let request = iow(BTRFS_IOCTL_MAGIC, 14, std::mem::size_of::<BtrfsIoctlVolArgs>());
+    let request = iow(
+        BTRFS_IOCTL_MAGIC,
+        14,
+        std::mem::size_of::<BtrfsIoctlVolArgs>(),
+    );
     let rc = unsafe {
         ioctl(
             parent_fd,

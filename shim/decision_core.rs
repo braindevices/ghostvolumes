@@ -5,9 +5,12 @@
 // `shim/preload.rs`).
 //
 // A decision file is gitignore-style, one per directory: each line is
-// `+ <pattern>` (convert), `- <pattern>` (never convert), a `#`
-// comment, or blank. Deliberately not a full gitignore clone - just
-// three pattern forms, resolved relative to the file's own directory:
+// `+ <pattern>` (convert), `- <pattern>` (never convert), `? <pattern>`
+// (still undecided - a machine-written marker, toggled in place into a
+// `+`/`-` line once a real decision is recorded for the same pattern),
+// a `#` comment (human-only, never written or touched by this tool),
+// or blank. Deliberately not a full gitignore clone - just three
+// pattern forms, resolved relative to the file's own directory:
 //   /name           anchored: that exact single location only
 //   name            unanchored: matches at any depth under this dir
 //   /a/b/**/name    anchored prefix, arbitrary depth after it
@@ -32,9 +35,12 @@ struct DecisionLine {
 
 /// Parses one decision file's raw text into its meaningful lines, in
 /// file order (so callers can apply "last matching line wins").
-/// Ignores blank lines and `#` comments (including the pending-comment
-/// lines the shim itself appends - §4 - which are never meant to be
-/// matched against, only turned into real `+`/`-` lines by a human).
+/// Ignores blank lines, `#` comments, and anything else that isn't
+/// exactly `+`/`-`-prefixed - including `?` pending-marker lines the
+/// shim (or `convert`, run non-interactively) appends (§4), which are
+/// never meant to be matched against, only toggled into real `+`/`-`
+/// lines later. No dedicated `?` handling needed here at all: it's
+/// already inert via the same catch-all as any other non-decision line.
 fn parse_lines(text: &str) -> alloc_free_vec::Vec<DecisionLine> {
     let mut lines = alloc_free_vec::Vec::new();
     for line in text.lines() {
@@ -73,8 +79,11 @@ mod alloc_free_vec {
 /// Only one `**` is supported (deliberately not a full gitignore
 /// clone); a pattern with more than one is treated as having none
 /// (falls back to exact-match semantics for the whole thing).
-fn split_double_star(pattern: &str) -> Option<(alloc_free_vec::Vec<&str>, alloc_free_vec::Vec<&str>)> {
-    let components: alloc_free_vec::Vec<&str> = pattern.split('/').filter(|c| !c.is_empty()).collect();
+fn split_double_star(
+    pattern: &str,
+) -> Option<(alloc_free_vec::Vec<&str>, alloc_free_vec::Vec<&str>)> {
+    let components: alloc_free_vec::Vec<&str> =
+        pattern.split('/').filter(|c| !c.is_empty()).collect();
     let star_positions: alloc_free_vec::Vec<usize> = components
         .iter()
         .enumerate()
@@ -92,7 +101,10 @@ fn split_double_star(pattern: &str) -> Option<(alloc_free_vec::Vec<&str>, alloc_
 
 /// The candidate's path components relative to `file_dir`, or `None`
 /// if `candidate` isn't under `file_dir` at all.
-fn relative_components(file_dir: &std::path::Path, candidate: &std::path::Path) -> Option<alloc_free_vec::Vec<String>> {
+fn relative_components(
+    file_dir: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<alloc_free_vec::Vec<String>> {
     let relative = candidate.strip_prefix(file_dir).ok()?;
     Some(
         relative
@@ -113,7 +125,11 @@ fn pattern_matches(file_dir: &std::path::Path, pattern: &str, candidate: &std::p
             if rel.len() < prefix.len() + suffix.len() {
                 return false;
             }
-            let prefix_matches = rel.iter().take(prefix.len()).map(String::as_str).eq(prefix.iter().copied());
+            let prefix_matches = rel
+                .iter()
+                .take(prefix.len())
+                .map(String::as_str)
+                .eq(prefix.iter().copied());
             let suffix_matches = rel[rel.len() - suffix.len()..]
                 .iter()
                 .map(String::as_str)
@@ -123,7 +139,10 @@ fn pattern_matches(file_dir: &std::path::Path, pattern: &str, candidate: &std::p
             let anchored_components: alloc_free_vec::Vec<&str> =
                 anchored.split('/').filter(|c| !c.is_empty()).collect();
             rel.len() == anchored_components.len()
-                && rel.iter().map(String::as_str).eq(anchored_components.iter().copied())
+                && rel
+                    .iter()
+                    .map(String::as_str)
+                    .eq(anchored_components.iter().copied())
         }
     } else {
         // Bare, unanchored name: matches at any depth under file_dir,
@@ -138,7 +157,11 @@ fn pattern_matches(file_dir: &std::path::Path, pattern: &str, candidate: &std::p
 ///
 /// Called by `resolve` below, which both `decide()` (shim) and
 /// `convert` (CLI) use.
-pub fn resolve_in_file(file_dir: &std::path::Path, text: &str, candidate: &std::path::Path) -> Option<bool> {
+pub fn resolve_in_file(
+    file_dir: &std::path::Path,
+    text: &str,
+    candidate: &std::path::Path,
+) -> Option<bool> {
     parse_lines(text)
         .into_iter()
         .rev()
@@ -174,7 +197,8 @@ pub fn resolve(
     }
     for ancestor in start.ancestors() {
         let candidate_file = ancestor.join(file_name);
-        let decision = read_file(&candidate_file).and_then(|text| resolve_in_file(ancestor, &text, candidate));
+        let decision =
+            read_file(&candidate_file).and_then(|text| resolve_in_file(ancestor, &text, candidate));
         if let Some(decision) = decision {
             return Some(decision);
         }
@@ -197,22 +221,64 @@ pub fn anchored_pattern(boundary: &std::path::Path, candidate: &std::path::Path)
     Some(format!("/{}", rel.to_string_lossy()))
 }
 
-/// The exact comment line the shim appends for a still-undecided
-/// candidate (§4).
+/// The exact pending-marker line the shim (or `convert`, run
+/// non-interactively) appends for a still-undecided candidate (§4).
+/// `?`, not `#` — a `#` line is a pure, untouched human comment
+/// forever; `?` means "the tool noted this pattern as
+/// seen-but-undecided," a machine-owned annotation that a later real
+/// decision for the *same* pattern can toggle in place
+/// (`toggle_or_replace_pending`) rather than leaving as stale clutter
+/// alongside the decision that supersedes it. `parse_lines` already
+/// ignores any line that isn't exactly `+`/`-`-prefixed, so `?` needs
+/// no changes anywhere in `resolve`/`resolve_in_file` — it's already
+/// inert for decision-resolution purposes, same as a `#` comment.
 #[allow(dead_code)]
-pub fn pending_comment_line(pattern: &str) -> String {
-    format!("# {pattern}")
+pub fn pending_marker_line(pattern: &str) -> String {
+    format!("? {pattern}")
 }
 
 /// `true` iff `text` (the decision file's current content) doesn't
-/// already contain this exact pending-comment line - best-effort dedup
+/// already contain this exact pending-marker line - best-effort dedup
 /// (§4): not airtight under concurrent appends from independent shim
 /// processes (a check-then-write race), but harmless if it isn't, since
-/// a duplicate comment is just an extra line to ignore or delete.
+/// a duplicate marker is just an extra line to ignore or delete.
 #[allow(dead_code)]
-pub fn needs_pending_comment(text: &str, pattern: &str) -> bool {
-    let line = pending_comment_line(pattern);
+pub fn needs_pending_marker(text: &str, pattern: &str) -> bool {
+    let line = pending_marker_line(pattern);
     !text.lines().any(|existing| existing.trim() == line)
+}
+
+/// Replaces an existing `? <pattern>` pending-marker line in place with
+/// `decision_line` (e.g. `+ <pattern>` or `- <pattern>`), preserving
+/// every other line's content and order unchanged. Only `pattern`
+/// itself needs to match the marker being searched for -
+/// `decision_line` can carry a completely different pattern (e.g. "a"/
+/// every-match-of-this-name recording a broader pattern than the
+/// anchored one its own pending marker used) and still lands in the
+/// same spot the marker occupied, since this is a plain line-content
+/// swap, not a match between the marker's pattern and the decision's
+/// own. Appends `decision_line` at the end instead if no matching
+/// pending marker is found - not every decision follows a prior
+/// pending note, so there's nothing to toggle in that case.
+#[allow(dead_code)]
+pub fn toggle_or_replace_pending(text: &str, pattern: &str, decision_line: &str) -> String {
+    let marker = pending_marker_line(pattern);
+    let mut replaced = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        if !replaced && line.trim() == marker {
+            out.push_str(decision_line);
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !replaced {
+        out.push_str(decision_line);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -230,13 +296,21 @@ mod tests {
     #[test]
     fn unanchored_pattern_matches_at_any_depth_by_leaf_name() {
         let dir = Path::new("/proj");
-        assert!(pattern_matches(dir, "node_modules", Path::new("/proj/node_modules")));
+        assert!(pattern_matches(
+            dir,
+            "node_modules",
+            Path::new("/proj/node_modules")
+        ));
         assert!(pattern_matches(
             dir,
             "node_modules",
             Path::new("/proj/packages/foo/node_modules")
         ));
-        assert!(!pattern_matches(dir, "node_modules", Path::new("/proj/packages/foo/dist")));
+        assert!(!pattern_matches(
+            dir,
+            "node_modules",
+            Path::new("/proj/packages/foo/dist")
+        ));
     }
 
     #[test]
@@ -305,7 +379,12 @@ mod tests {
                 "- node_modules\n",
             ),
         ];
-        let read = |p: &Path| files.iter().find(|(fp, _)| *fp == p).map(|(_, t)| t.to_string());
+        let read = |p: &Path| {
+            files
+                .iter()
+                .find(|(fp, _)| *fp == p)
+                .map(|(_, t)| t.to_string())
+        };
         let decision = resolve(
             Path::new("/proj/packages/foo/node_modules"),
             Path::new("/proj"),
@@ -324,7 +403,12 @@ mod tests {
             (Path::new("/proj/.decisions"), "+ node_modules\n"),
             (Path::new("/proj/packages/foo/.decisions"), "+ dist\n"),
         ];
-        let read = |p: &Path| files.iter().find(|(fp, _)| *fp == p).map(|(_, t)| t.to_string());
+        let read = |p: &Path| {
+            files
+                .iter()
+                .find(|(fp, _)| *fp == p)
+                .map(|(_, t)| t.to_string())
+        };
         let decision = resolve(
             Path::new("/proj/packages/foo/node_modules"),
             Path::new("/proj"),
@@ -351,7 +435,12 @@ mod tests {
         // A decision file sitting *above* the boundary must never be
         // consulted, even if nothing below it resolves anything.
         let files = [(Path::new("/.decisions"), "+ node_modules\n")];
-        let read = |p: &Path| files.iter().find(|(fp, _)| *fp == p).map(|(_, t)| t.to_string());
+        let read = |p: &Path| {
+            files
+                .iter()
+                .find(|(fp, _)| *fp == p)
+                .map(|(_, t)| t.to_string())
+        };
         let decision = resolve(
             Path::new("/proj/node_modules"),
             Path::new("/proj"),
@@ -374,30 +463,76 @@ mod tests {
 
     #[test]
     fn anchored_pattern_none_outside_the_boundary() {
-        assert_eq!(anchored_pattern(Path::new("/proj"), Path::new("/other/node_modules")), None);
-    }
-
-    #[test]
-    fn pending_comment_line_prefixes_with_a_hash() {
         assert_eq!(
-            pending_comment_line("/packages/foo/node_modules"),
-            "# /packages/foo/node_modules"
+            anchored_pattern(Path::new("/proj"), Path::new("/other/node_modules")),
+            None
         );
     }
 
     #[test]
-    fn needs_pending_comment_true_when_absent() {
-        assert!(needs_pending_comment("+ dist\n", "/packages/foo/node_modules"));
+    fn pending_marker_line_prefixes_with_a_question_mark() {
+        assert_eq!(
+            pending_marker_line("/packages/foo/node_modules"),
+            "? /packages/foo/node_modules"
+        );
     }
 
     #[test]
-    fn needs_pending_comment_false_when_already_present() {
-        let text = "+ dist\n# /packages/foo/node_modules\n";
-        assert!(!needs_pending_comment(text, "/packages/foo/node_modules"));
+    fn needs_pending_marker_true_when_absent() {
+        assert!(needs_pending_marker(
+            "+ dist\n",
+            "/packages/foo/node_modules"
+        ));
     }
 
     #[test]
-    fn needs_pending_comment_true_for_empty_file() {
-        assert!(needs_pending_comment("", "/node_modules"));
+    fn needs_pending_marker_false_when_already_present() {
+        let text = "+ dist\n? /packages/foo/node_modules\n";
+        assert!(!needs_pending_marker(text, "/packages/foo/node_modules"));
+    }
+
+    #[test]
+    fn needs_pending_marker_true_for_empty_file() {
+        assert!(needs_pending_marker("", "/node_modules"));
+    }
+
+    #[test]
+    fn toggle_or_replace_pending_replaces_the_marker_in_place() {
+        let text = "+ dist\n? /node_modules\n- vendor\n";
+        assert_eq!(
+            toggle_or_replace_pending(text, "/node_modules", "+ /node_modules"),
+            "+ dist\n+ /node_modules\n- vendor\n"
+        );
+    }
+
+    #[test]
+    fn toggle_or_replace_pending_appends_when_no_marker_exists() {
+        let text = "+ dist\n";
+        assert_eq!(
+            toggle_or_replace_pending(text, "/node_modules", "- /node_modules"),
+            "+ dist\n- /node_modules\n"
+        );
+    }
+
+    #[test]
+    fn toggle_or_replace_pending_only_replaces_the_exact_pattern() {
+        let text = "? /node_modules\n? /packages/foo/node_modules\n";
+        assert_eq!(
+            toggle_or_replace_pending(text, "/node_modules", "+ /node_modules"),
+            "+ /node_modules\n? /packages/foo/node_modules\n"
+        );
+    }
+
+    #[test]
+    fn toggle_or_replace_pending_lands_a_differently_patterned_replacement_in_the_same_spot() {
+        // "a"/every-match-of-this-name records a broader pattern than
+        // the anchored one its own pending marker used - still an
+        // in-place swap, not a remove-then-append-at-the-end: the
+        // replacement's pattern never has to match the search pattern.
+        let text = "# a comment\n? /packages/foo/node_modules\n# another comment\n";
+        assert_eq!(
+            toggle_or_replace_pending(text, "/packages/foo/node_modules", "+ node_modules"),
+            "# a comment\n+ node_modules\n# another comment\n"
+        );
     }
 }

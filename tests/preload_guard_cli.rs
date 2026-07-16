@@ -9,7 +9,7 @@ use tempfile::tempdir;
 // instead of hand-keeping a local copy of `SHIM_FILE_NAME`.
 include!("../src/filenames.rs");
 
-/// A `ghostvolumes scan` invocation with `HOME` set to `home` (or
+/// A `ghostvolumes roots scan` invocation with `HOME` set to `home` (or
 /// removed entirely if `None`, to test the guard's `$HOME`-independence)
 /// and no `XDG_*` overrides - the setup every test here needs, before
 /// each one adds its own `LD_PRELOAD` value.
@@ -21,7 +21,7 @@ fn ghostvolumes_scan_cmd(home: Option<&Path>) -> Command {
     };
     cmd.env_remove("XDG_CONFIG_HOME");
     cmd.env_remove("XDG_DATA_HOME");
-    cmd.arg("scan");
+    cmd.args(["roots", "scan"]);
     cmd
 }
 

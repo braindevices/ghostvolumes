@@ -106,10 +106,10 @@ struct Cli {
 #[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum Command {
-    /// Detect BTRFS snapshot-managed roots (dry run unless --save)
-    Scan {
-        #[arg(long)]
-        save: bool,
+    /// Manage roots.d: detect BTRFS roots, list the effective config
+    Roots {
+        #[command(subcommand)]
+        action: RootsAction,
     },
     /// Rebuild the compiled runtime cache from the TOML config
     Reload,
@@ -145,6 +145,18 @@ enum Command {
 
 #[cfg(target_os = "linux")]
 #[derive(Subcommand)]
+enum RootsAction {
+    /// Detect BTRFS snapshot-managed roots (dry run unless --save)
+    Scan {
+        #[arg(long)]
+        save: bool,
+    },
+    /// List every root.d-configured root and its effective watch list
+    List,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
 enum ProjectsAction {
     /// List every registered project root, flagging any that no longer exist
     List,
@@ -155,6 +167,46 @@ enum ProjectsAction {
     Unregister { path: Option<String> },
 }
 
+/// Resolves a raw CLI path argument to an absolute path before it's
+/// used anywhere — purely lexical (`std::path::absolute`, not
+/// `canonicalize`): joins against the current directory and normalizes
+/// `.`/`..` components without touching the filesystem or requiring the
+/// path to already exist, since `convert`'s whole point is to work with
+/// not-yet-existing targets too. A relative argument (e.g. a typo
+/// missing a leading `/`) must never silently operate on, or create,
+/// state relative to whatever the current directory happens to be —
+/// this is the fix for exactly that: a stray subvolume and a
+/// confusingly relative-looking lock file, both created under the
+/// wrong location, traced back to an unresolved relative `convert`
+/// argument.
+#[cfg(target_os = "linux")]
+fn absolutize(path: &str) -> anyhow::Result<PathBuf> {
+    std::path::absolute(path).map_err(|e| anyhow::anyhow!("could not resolve path {path:?}: {e}"))
+}
+
+#[cfg(all(target_os = "linux", test))]
+mod absolutize_tests {
+    use super::absolutize;
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_already_absolute_path_is_returned_unchanged() {
+        assert_eq!(
+            absolutize("/already/absolute/path").unwrap(),
+            PathBuf::from("/already/absolute/path")
+        );
+    }
+
+    #[test]
+    fn a_relative_path_resolves_against_the_current_directory() {
+        // Only ever *reads* the current directory, never sets it - a
+        // test that changed it would race every other test running
+        // concurrently in this same process.
+        let expected = std::env::current_dir().unwrap().join("some-subdir");
+        assert_eq!(absolutize("some-subdir").unwrap(), expected);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -163,20 +215,30 @@ fn main() -> anyhow::Result<()> {
         filenames::SHIM_FILE_NAME,
     )?;
     match cli.command {
-        Command::Scan { save } => {
-            let roots = scan::detect_roots()?;
-            if save {
-                let config_dir = xdg::config_dir()?;
-                scan::save_roots(&config_dir, &roots)?;
-                let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
-                reload::reload(&config_dir, &cache_path)?;
-            } else {
-                for root in &roots {
-                    println!("{root}");
+        Command::Roots { action } => match action {
+            RootsAction::Scan { save } => {
+                let roots = scan::detect_roots()?;
+                if save {
+                    let config_dir = xdg::config_dir()?;
+                    scan::save_roots(&config_dir, &roots)?;
+                    let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
+                    reload::reload(&config_dir, &cache_path)?;
+                } else {
+                    for root in &roots {
+                        println!("{root}");
+                    }
                 }
+                Ok(())
             }
-            Ok(())
-        }
+            RootsAction::List => {
+                let config_dir = xdg::config_dir()?;
+                let merged = merge::load_all(&config_dir)?;
+                for root in &merged.roots {
+                    println!("{}\t{}", root.path, root.watches.join(", "));
+                }
+                Ok(())
+            }
+        },
         Command::Reload => {
             let config_dir = xdg::config_dir()?;
             let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
@@ -194,7 +256,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let config_dir = xdg::config_dir()?;
             let start = match path {
-                Some(p) => PathBuf::from(p),
+                Some(p) => absolutize(&p)?,
                 None => PathBuf::from(std::env::var("HOME")?),
             };
             let merged = merge::load_all(&config_dir)?;
@@ -237,7 +299,7 @@ fn main() -> anyhow::Result<()> {
             let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
             let project_roots_path = data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME);
             convert::convert(
-                &PathBuf::from(path),
+                &absolutize(&path)?,
                 max_depth,
                 &cache_path,
                 &project_roots_path,
@@ -257,8 +319,15 @@ fn main() -> anyhow::Result<()> {
                     }
                     Ok(())
                 }
-                ProjectsAction::Register { path } => projects::register(&list_path, &path),
+                ProjectsAction::Register { path } => {
+                    let path = absolutize(&path)?.display().to_string();
+                    projects::register(&list_path, &path)
+                }
                 ProjectsAction::Unregister { path } => {
+                    let path = path
+                        .map(|p| absolutize(&p))
+                        .transpose()?
+                        .map(|p| p.display().to_string());
                     projects::unregister(&list_path, path.as_deref())
                 }
             }

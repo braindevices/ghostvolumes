@@ -20,8 +20,8 @@ Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, .
 
 ```bash
 cargo install --git https://github.com/braindevices/ghostvolumes
-ghostvolumes init          # compile + install the LD_PRELOAD shim, write default config
-ghostvolumes scan --save   # detect your snapshot-managed BTRFS roots
+ghostvolumes init                # compile + install the LD_PRELOAD shim, write default config
+ghostvolumes roots scan --save   # detect your snapshot-managed BTRFS roots
 ```
 
 That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](FAQ.md) for the recommended workflow.
@@ -31,8 +31,8 @@ That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (
 Two commands, plus an explicit decision record in between:
 
 - **`ghostvolumes intercept -- <cmd>`** runs `<cmd>` with the shim active for that command only. It intercepts `mkdir`/`mkdirat` and converts a directory into a subvolume — but only if a `+` decision is already recorded for it.
-- **`ghostvolumes convert <path>`** recursively converts matching directories under `<path>` (creating them fresh or migrating them in place) and asks whether to remember each decision.
-- **Decision files** (`.ghostvolumes-decisions`, one per directory, gitignore-style) record what's approved or denied. `intercept` never prompts — it runs inside arbitrary subprocess trees with no guaranteed terminal — so an undecided directory is skipped, and a `#`-prefixed note is appended for later review. `convert` is the one place prompting happens, since it's a deliberate, explicit CLI invocation.
+- **`ghostvolumes convert <path>`** asks *before* touching anything: "yes"/"all" converts (creating fresh or migrating in place) and records a `+` decision; "no" converts nothing and records a `-` instead. Run non-interactively (no TTY), it converts nothing and leaves a pending `?` marker instead, same as `intercept` below.
+- **Decision files** (`.ghostvolumes-decisions`, one per directory, gitignore-style) record what's approved (`+`), denied (`-`), or still pending (`?`) — `#` is reserved for human comments and never written or touched by the tool. `intercept` never prompts — it runs inside arbitrary subprocess trees with no guaranteed terminal — so an undecided directory is skipped, and a `?`-prefixed marker is appended for later review. `convert` is the one place prompting happens when it can, since it's a deliberate, explicit CLI invocation; when it later resolves a candidate that already has a pending marker, that same line becomes the real decision instead of leaving both around.
 
 See [design.md](design.md) for the full rationale behind this model.
 
@@ -40,7 +40,8 @@ See [design.md](design.md) for the full rationale behind this model.
 
 | Command | What it does |
 |---|---|
-| `ghostvolumes scan [--save]` | Detect BTRFS snapshot-managed roots |
+| `ghostvolumes roots scan [--save]` | Detect BTRFS snapshot-managed roots |
+| `ghostvolumes roots list` | List every configured root and its effective watch list |
 | `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d` |
 | `ghostvolumes discover [PATH] [--max-depth N] [--save]` | Find subvolumes that already exist and suggest decision-file lines |
 | `ghostvolumes convert <path> [--max-depth N]` | Recursively convert subvolume candidates, prompting to remember decisions |
@@ -56,7 +57,7 @@ See [design.md](design.md) for the full rationale behind this model.
 Global config lives under `~/.config/ghostvolumes/roots.d/`:
 
 ```
-roots.d/00-auto.toml     # written by `scan --save` — regenerated, don't hand-edit
+roots.d/00-auto.toml     # written by `roots scan --save` — regenerated, don't hand-edit
 roots.d/00-defaults.toml # ships with the package: default-watches = node_modules, target, .venv, .cache, build
 roots.d/10-local.toml    # hand-edited: extra roots, per-root overrides, disabling a root
 ```
@@ -73,7 +74,7 @@ default-watches = ["node_modules", "target", ".venv", "build"]
 watches = ["node_modules", "dist"]   # this root only watches these two
 
 ["/mnt/noisy-backup-drive"]
-enabled = false                      # scan --save keeps finding this root; suppress it
+enabled = false                      # roots scan --save keeps finding this root; suppress it
 ```
 
 A disabled root doesn't cascade to any other root nested under its
@@ -89,8 +90,16 @@ Per-project, committed to the repo they live in — one `.ghostvolumes-decisions
 + /dist                        # anchored: this exact location only
 + /packages/*/**/node_modules  # anchored prefix, arbitrary depth after it
 - vendor                       # never convert, at any depth
-# /build/should-review-this    # pending note the shim appended, not yet a decision
+? /build/should-review-this    # pending: the shim (or convert, run non-interactively) noted this, not yet a decision
+# a real comment, for humans only - never touched by any of the above
 ```
+
+A later real decision for the *same* pattern replaces a `?` line in
+place rather than leaving both around — answering "no"/"yes" for
+`/build/should-review-this` above would turn that exact line into `-
+/build/should-review-this` or `+ /build/should-review-this`, not add a
+second line underneath it. `#` is the one prefix reserved for humans;
+nothing in this tool ever writes or rewrites a `#` line.
 
 | Pattern | Meaning |
 |---|---|

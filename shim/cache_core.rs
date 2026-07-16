@@ -45,7 +45,10 @@ pub fn parse(text: &str) -> Vec<(String, String)> {
 /// `mod`-based compilation call it) — allowed rather than removed,
 /// since it's very much alive there.
 #[allow(dead_code)]
-pub fn names_for(rows: &[(String, String)], path: &std::path::Path) -> std::collections::BTreeSet<String> {
+pub fn names_for(
+    rows: &[(String, String)],
+    path: &std::path::Path,
+) -> std::collections::BTreeSet<String> {
     rows.iter()
         .filter(|(prefix, _)| path.starts_with(std::path::Path::new(prefix)))
         .map(|(_, name)| name.clone())
@@ -68,7 +71,10 @@ pub fn names_for(rows: &[(String, String)], path: &std::path::Path) -> std::coll
 /// `mod`-based compilation call it, same as `names_for` above) -
 /// allowed rather than removed.
 #[allow(dead_code)]
-pub fn longest_matching_prefix(rows: &[(String, String)], path: &std::path::Path) -> Option<String> {
+pub fn longest_matching_prefix(
+    rows: &[(String, String)],
+    path: &std::path::Path,
+) -> Option<String> {
     rows.iter()
         .map(|(prefix, _)| prefix.as_str())
         .filter(|prefix| path.starts_with(std::path::Path::new(prefix)))
@@ -114,7 +120,11 @@ mod tests {
         let names = names_for(&rows, Path::new("/home/user1/projects/app/sub"));
         assert_eq!(
             names,
-            BTreeSet::from(["node_modules".to_string(), "target".to_string(), "dist".to_string()])
+            BTreeSet::from([
+                "node_modules".to_string(),
+                "target".to_string(),
+                "dist".to_string()
+            ])
         );
     }
 
@@ -137,7 +147,10 @@ mod tests {
     #[test]
     fn longest_matching_prefix_none_when_nothing_matches() {
         let rows = vec![("/home/user1".to_string(), "node_modules".to_string())];
-        assert_eq!(longest_matching_prefix(&rows, Path::new("/etc/elsewhere")), None);
+        assert_eq!(
+            longest_matching_prefix(&rows, Path::new("/etc/elsewhere")),
+            None
+        );
     }
 
     #[test]
@@ -151,7 +164,10 @@ mod tests {
 
     #[test]
     fn longest_matching_prefix_respects_component_boundaries() {
-        let rows = vec![("/home/user1/projects/big-frontend".to_string(), "dist".to_string())];
+        let rows = vec![(
+            "/home/user1/projects/big-frontend".to_string(),
+            "dist".to_string(),
+        )];
         assert_eq!(
             longest_matching_prefix(&rows, Path::new("/home/user1/projects/big-frontend2/sub")),
             None
@@ -160,7 +176,10 @@ mod tests {
 
     #[test]
     fn names_for_respects_component_boundaries_not_string_prefix() {
-        let rows = vec![("/home/user1/projects/big-frontend".to_string(), "dist".to_string())];
+        let rows = vec![(
+            "/home/user1/projects/big-frontend".to_string(),
+            "dist".to_string(),
+        )];
         // "big-frontend2" shares a string prefix with "big-frontend"
         // but is not actually under it.
         assert!(names_for(&rows, Path::new("/home/user1/projects/big-frontend2/sub")).is_empty());
