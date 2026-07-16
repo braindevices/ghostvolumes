@@ -51,11 +51,28 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use clap::{Parser, Subcommand};
 
+/// `CARGO_PKG_VERSION` alone (e.g. "0.3.1") doesn't say *which* commit
+/// was actually built - two installs both claiming "0.3.1" could be
+/// meaningfully different if the version wasn't bumped between them.
+/// `git describe`'s output (via `build.rs`'s `vergen-gitcl` call) adds
+/// that: exactly "v0.3.1" when built right at that tag, or
+/// "v0.3.1-3-gabc1234" three commits past it. Needs a tag to actually
+/// exist somewhere in history to be meaningful - with none at all,
+/// `git describe` falls back to the bare commit hash instead (see
+/// `CHANGELOG.md`'s 0.3.1 entry for this project's own tagging).
+#[cfg(target_os = "linux")]
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("VERGEN_GIT_DESCRIBE"),
+    ")"
+);
+
 #[cfg(target_os = "linux")]
 #[derive(Parser)]
 #[command(
     name = "ghostvolumes",
-    version,
+    version = VERSION,
     about = "Isolate volatile build artifacts into unsnapshotted BTRFS subvolumes"
 )]
 struct Cli {

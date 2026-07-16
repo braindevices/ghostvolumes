@@ -2,6 +2,11 @@
 
 Notable changes to this project, loosely following [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.3.1 — 2026-07-16
+
+- **Added** `git describe` output to `ghostvolumes --version` (e.g. `0.3.1 (v0.3.1)`, or `0.3.1 (v0.3.1-3-gabc1234)` a few commits past a tag) via `vergen-gitcl` in `build.rs` — `CARGO_PKG_VERSION` alone can't distinguish two builds that both claim the same version but come from different commits. Chose the `git`-CLI-shelling-out backend over `vergen-gix`/`vergen-git2`: `git` is already a hard prerequisite for this project's only supported install path (`cargo install --git`), so shelling out to it costs nothing extra, unlike `vergen-gix`'s ~500-crate transitive dependency tree or `vergen-git2`'s libgit2 C dependency.
+- Tagged `v0.3.0` (retroactively, at the commit the 0.3.0 release actually landed on) and `v0.3.1` — this project didn't tag releases before now.
+
 ## 0.3.0 — 2026-07-13
 
 Cross-process atomic file I/O, plus a proper project-roots lifecycle. See [design.md](design.md) for the full rationale.

@@ -22,6 +22,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+use vergen_gitcl::{Emitter, Gitcl};
+
 const SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
 
 fn main() {
@@ -31,6 +33,26 @@ fn main() {
     // `env!("GHOSTVOLUMES_SHIM_FILE_NAME")` and gets a confusing build
     // failure because this line never ran for that target.
     println!("cargo:rustc-env=GHOSTVOLUMES_SHIM_FILE_NAME={SHIM_FILE_NAME}");
+
+    // `VERGEN_GIT_DESCRIBE` (and friends) for main.rs's `--version`
+    // string - `vergen-gitcl` (shells out to the `git` CLI) rather than
+    // `vergen-gix`/`vergen-git2`: `git` is already a hard prerequisite
+    // for this project's only supported install path (`cargo install
+    // --git` needs it just to clone), so shelling out to it here costs
+    // nothing extra in practice, unlike `vergen-gix`'s huge pure-Rust
+    // `gix` dependency tree (~500 transitive crates vs. ~50) or
+    // `vergen-git2`'s libgit2 C dependency. Emitted unconditionally too,
+    // same reasoning as above. Doesn't fail the build if `.git` is
+    // missing (e.g. a tarball export rather than the `cargo install
+    // --git` checkout this project actually supports) - `Emitter`'s
+    // default is to emit an idempotent placeholder instead of erroring,
+    // so `env!("VERGEN_GIT_DESCRIBE")` in main.rs is always defined,
+    // just not always meaningful.
+    Emitter::default()
+        .add_instructions(&Gitcl::all_git())
+        .expect("failed to configure vergen-gitcl git instructions")
+        .emit()
+        .expect("failed to emit vergen-gitcl build instructions");
 
     let target = env::var("TARGET").unwrap();
     // On non-Linux, src/main.rs's Command::new mod (and everything
