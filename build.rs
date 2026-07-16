@@ -51,20 +51,32 @@ fn current_branch() -> Option<String> {
     Some(branch)
 }
 
-/// This project's GitFlow-shaped branch model (`.github/workflows/ci.yml`:
-/// `main` = release, `develop` = pre-release, plus `hotfix/*`/`feature/*`)
-/// mapped onto SemVer pre-release suffixes, so `--version` distinguishes
-/// which line of development a build came from at a glance - on top of
-/// (not instead of) `VERGEN_GIT_DESCRIBE`'s own "how far from a tag"
-/// signal, which alone can't tell `develop` and `main` apart if both
-/// happen to sit the same distance from their nearest tag.
-fn version_suffix(branch: Option<&str>) -> &'static str {
-    match branch {
-        Some("main") | Some("master") | None => "",
-        Some("develop") => "-alpha",
-        Some(b) if b.starts_with("hotfix/") => "-rc",
-        Some(_) => "-dev",
+// `parse_tag`/`compute_version` - see `build_version_core.rs`'s doc
+// comment for why this is `include!`d rather than a normal `mod`
+// (its own unit tests need to run as part of the main crate's test
+// suite, via the matching `include!` in `src/main.rs`, since `cargo
+// test` never compiles `build.rs` itself with `--cfg test`).
+include!("build_version_core.rs");
+
+/// The latest reachable tag as `(major, minor, patch)`, via `git
+/// describe --tags --abbrev=0` - the bare nearest-tag name, not `git
+/// describe`'s usual `-N-gHASH` distance-from-tag form (that's
+/// `VERGEN_GIT_DESCRIBE`'s job). `None` if no tag is reachable at all -
+/// a fresh repo with no releases yet, or CI's shallow/tagless checkout
+/// (`.github/workflows/ci.yml`'s `actions/checkout@v7` doesn't fetch
+/// tags) - in which case `compute_version` falls back to trusting
+/// `Cargo.toml`'s `version` field as manually maintained, same as the
+/// old flat-suffix scheme.
+fn latest_tag_version() -> Option<(u64, u64, u64)> {
+    let output = Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    parse_tag(raw.trim())
 }
 
 fn main() {
@@ -95,8 +107,13 @@ fn main() {
         .emit()
         .expect("failed to emit vergen-gitcl build instructions");
 
-    let suffix = version_suffix(current_branch().as_deref());
-    println!("cargo:rustc-env=GHOSTVOLUMES_VERSION_SUFFIX={suffix}");
+    let cargo_pkg_version = env::var("CARGO_PKG_VERSION").unwrap();
+    let version = compute_version(
+        current_branch().as_deref(),
+        latest_tag_version(),
+        &cargo_pkg_version,
+    );
+    println!("cargo:rustc-env=GHOSTVOLUMES_VERSION={version}");
 
     let target = env::var("TARGET").unwrap();
     // On non-Linux, src/main.rs's Command::new mod (and everything

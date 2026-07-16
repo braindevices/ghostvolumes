@@ -2,6 +2,16 @@
 // Linux-specific (§8.3) - every module here depends on at least one of
 // them, so gate the whole implementation rather than have it fail to
 // compile confusingly on other platforms.
+// Not gated behind `target_os = "linux"` like the modules below -
+// `build_version_core.rs`'s logic is plain string/number parsing with
+// no OS dependency, and only exists here (rather than only in
+// `build.rs`) so its `#[cfg(test)]` unit tests actually run - see that
+// file's doc comment for why.
+#[cfg(test)]
+mod build_version_check {
+    include!("../build_version_core.rs");
+}
+
 #[cfg(target_os = "linux")]
 mod atomic_write;
 #[cfg(target_os = "linux")]
@@ -61,17 +71,21 @@ use clap::{Parser, Subcommand};
 /// `git describe` falls back to the bare commit hash instead (see
 /// `CHANGELOG.md`'s 0.3.1 entry for this project's own tagging).
 ///
-/// `GHOSTVOLUMES_VERSION_SUFFIX` (also `build.rs`, its own
-/// `current_branch()`/`version_suffix()`) adds a SemVer pre-release
-/// label for this project's GitFlow-shaped branches - empty on
-/// `main`/`master`/detached, `-alpha` on `develop`, `-rc` on
-/// `hotfix/*`, `-dev` on anything else (`feature/*` included) - since
-/// `VERGEN_GIT_DESCRIBE`'s own "commits past the last tag" count alone
-/// can't distinguish which branch a build came from.
+/// `GHOSTVOLUMES_VERSION` (also `build.rs`, its own
+/// `current_branch()`/`compute_version()`) is a full SemVer version for
+/// this project's GitFlow-shaped branches, not just `CARGO_PKG_VERSION`
+/// plus a suffix: `main`/`master`/detached HEAD use `CARGO_PKG_VERSION`
+/// unchanged, but `develop`/`feature/*` bump the *minor* version
+/// (`-alpha`/`-dev`) and `hotfix/*` bumps the *patch* version (`-rc`),
+/// off the latest git tag rather than off `Cargo.toml`. That bump is
+/// what keeps SemVer precedence correct after a release: a pre-release
+/// suffix left on the *same* base number as the release just tagged
+/// (e.g. "0.3.2-alpha" right after tagging v0.3.2) would sort *below*
+/// that release, making ongoing development look older than what's
+/// already shipped.
 #[cfg(target_os = "linux")]
 const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    env!("GHOSTVOLUMES_VERSION_SUFFIX"),
+    env!("GHOSTVOLUMES_VERSION"),
     " (",
     env!("VERGEN_GIT_DESCRIBE"),
     ")"
