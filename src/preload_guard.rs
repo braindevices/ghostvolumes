@@ -58,7 +58,7 @@ pub fn refuse_if_shim_preloaded(
             "LD_PRELOAD already contains {shim_file_name} - refusing to run.\n\
              Current LD_PRELOAD: {}\n\
              This almost always means `ghostvolumes shell-init`'s export line was added to a \
-             shell rc file, which is not recommended (see README.md's \"Why not just export \
+             shell rc file, which is not recommended (see FAQ.md's \"Why not just export \
              LD_PRELOAD globally?\"). Remove it from your rc file, then use \
              `ghostvolumes intercept -- <cmd>` per build instead (or `intercept -- bash`/`zsh` \
              for a whole wrapped session) - `ghostvolumes` itself should never run with its own \

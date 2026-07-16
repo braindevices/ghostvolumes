@@ -19,7 +19,14 @@ const PRELOAD_SO: &[u8] = include_bytes!(concat!(
     env!("GHOSTVOLUMES_SHIM_FILE_NAME")
 ));
 
-const DEFAULT_WATCHED: &str = "names = [\"node_modules\", \"target\", \".venv\", \"build\"]\n";
+const DEFAULT_WATCHED: &str = r#"names = [
+    "node_modules",
+    "target",
+    ".venv",
+    ".cache",
+    "build",
+]
+"#;
 
 pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
