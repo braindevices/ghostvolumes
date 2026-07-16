@@ -151,6 +151,45 @@ fn pattern_matches(file_dir: &std::path::Path, pattern: &str, candidate: &std::p
     }
 }
 
+/// Parses a `.ghostvolumes-ignore` file's raw text into a flat list of
+/// patterns to never walk into at all — same three pattern forms a
+/// decision file uses (`name`, `/name`, `/a/b/**/name`), but no
+/// `+`/`-`/`?` prefix: every non-blank, non-`#`-comment line is just a
+/// pattern, since there's nothing to decide here, only whether to
+/// descend.
+///
+/// Dead code from the shim's own perspective (like `names_for`/
+/// `longest_matching_prefix` in `cache_core.rs`) — the shim intercepts
+/// `mkdir`/`mkdirat`, it never walks a directory tree, so only
+/// `convert`/`discover` (CLI-side) ever call this.
+#[allow(dead_code)]
+pub fn parse_ignore_patterns(text: &str) -> std::vec::Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `true` if `candidate` matches any of `patterns`, resolved relative
+/// to `anchor_dir` — reuses `pattern_matches`'s exact grammar for a
+/// different purpose than a decision file: skip descending into
+/// `candidate` entirely (never even check it for a watched-name match),
+/// not decide whether to convert it.
+///
+/// Dead code from the shim's own perspective — see
+/// `parse_ignore_patterns` above.
+#[allow(dead_code)]
+pub fn ignore_matches(
+    patterns: &[String],
+    anchor_dir: &std::path::Path,
+    candidate: &std::path::Path,
+) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| pattern_matches(anchor_dir, pattern, candidate))
+}
+
 /// Resolves `candidate`'s decision from one decision file's raw text:
 /// the *last* matching line wins (lets a user add a narrow override
 /// after a broad rule). `None` if nothing in this file matches.
@@ -337,6 +376,51 @@ mod tests {
     fn pattern_never_matches_a_path_outside_the_file_directory() {
         let dir = Path::new("/proj");
         assert!(!pattern_matches(dir, "build", Path::new("/other/build")));
+    }
+
+    #[test]
+    fn parse_ignore_patterns_skips_blank_lines_and_comments() {
+        let text = "\n.git\n# a comment\n  .hg  \n";
+        assert_eq!(
+            parse_ignore_patterns(text),
+            vec![".git".to_string(), ".hg".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_ignore_patterns_empty_text_yields_empty() {
+        assert!(parse_ignore_patterns("").is_empty());
+    }
+
+    #[test]
+    fn ignore_matches_true_when_any_pattern_matches() {
+        let patterns = vec![".git".to_string(), ".hg".to_string()];
+        assert!(ignore_matches(
+            &patterns,
+            Path::new("/proj"),
+            Path::new("/proj/.hg")
+        ));
+    }
+
+    #[test]
+    fn ignore_matches_false_when_nothing_matches() {
+        let patterns = vec![".git".to_string()];
+        assert!(!ignore_matches(
+            &patterns,
+            Path::new("/proj"),
+            Path::new("/proj/src")
+        ));
+    }
+
+    #[test]
+    fn ignore_matches_supports_anchored_and_double_star_patterns_too() {
+        // Same grammar as decision-file patterns - not just bare names.
+        let patterns = vec!["/vendor/**/cache".to_string()];
+        assert!(ignore_matches(
+            &patterns,
+            Path::new("/proj"),
+            Path::new("/proj/vendor/a/b/cache")
+        ));
     }
 
     #[test]

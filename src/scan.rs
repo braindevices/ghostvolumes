@@ -52,6 +52,7 @@ pub fn detect_roots() -> anyhow::Result<Vec<String>> {
 pub fn save_roots(config_dir: &Path, roots: &[String]) -> anyhow::Result<()> {
     let file = RootsFile {
         default_watches: None,
+        default_ignore: None,
         roots: roots
             .iter()
             .map(|r| (r.clone(), RawRootEntry::default()))

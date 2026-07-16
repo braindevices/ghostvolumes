@@ -229,13 +229,16 @@ handles migrated-in-stale ones for free.
 vars only — no config file.**
 An earlier draft routed this through a `settings.toml` → compiled
 `shim.conf` pipeline, mirroring `compiled.tsv`'s pattern. Rejected: a
-boolean and a path don't need that machinery, and reusing
-`compiled.tsv` itself for settings has a real correctness trap — an
-empty-string sentinel prefix for a "not a path" row makes
-`Path::starts_with("")` match *every* path, corrupting matching for
-every intercepted call. Env vars sidestep this entirely and are read
-fresh every process start, so there's no compiled artifact to go
-stale.
+small enum and a path don't need that machinery (originally just a
+boolean, later extended to a five-level `error`/`warn`/`info`/`debug`/
+`trace` scale shared with the CLI's own trace output — see
+`ai-work/tasks/leveled-verbosity.plan.md` — without changing this
+reasoning at all), and reusing `compiled.tsv` itself for settings has a
+real correctness trap — an empty-string sentinel prefix for a "not a
+path" row makes `Path::starts_with("")` match *every* path, corrupting
+matching for every intercepted call. Env vars sidestep this entirely
+and are read fresh every process start, so there's no compiled
+artifact to go stale.
 
 **The shim never writes to stdout/stderr, ever.**
 It's injected into arbitrary host processes, including TUIs — writing

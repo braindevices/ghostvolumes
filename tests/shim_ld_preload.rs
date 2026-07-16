@@ -475,7 +475,7 @@ fn debug_mode_logs_every_decision_with_its_reason() {
             .env("HOME", fake_home())
             .env("XDG_DATA_HOME", data_home.path())
             .env("GHOSTVOLUMES_LOG_FILE", log_file.path())
-            .env("GHOSTVOLUMES_DEBUG", "1")
+            .env("GHOSTVOLUMES_DEBUG", "debug")
             .env("LD_PRELOAD", compiled_shim())
             .status()
             .unwrap()
@@ -532,7 +532,7 @@ fn debug_mode_logs_every_decision_with_its_reason() {
 }
 
 #[test]
-fn ghostvolumes_debug_zero_explicitly_disables_debug_logging() {
+fn ghostvolumes_debug_info_explicitly_disables_debug_logging() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
@@ -544,7 +544,37 @@ fn ghostvolumes_debug_zero_explicitly_disables_debug_logging() {
         .env("HOME", fake_home())
         .env("XDG_DATA_HOME", data_home.path())
         .env("GHOSTVOLUMES_LOG_FILE", log_file.path())
-        .env("GHOSTVOLUMES_DEBUG", "0")
+        .env("GHOSTVOLUMES_DEBUG", "info")
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // A no-cache-match SKIP is debug-only - nothing at all should be
+    // logged for it at the (explicit, non-default-inferred) Info level.
+    let log_text = std::fs::read_to_string(log_file.path()).unwrap();
+    assert!(log_text.is_empty(), "log:\n{log_text}");
+}
+
+#[test]
+fn an_unrecognized_ghostvolumes_debug_value_degrades_to_the_info_default() {
+    // Same assertion as the explicit "info" test above, but with a
+    // value that isn't one of the five recognized level names at all -
+    // must degrade to the Info default rather than panicking or (the
+    // old, now-abandoned convention) enabling debug for any non-empty
+    // value.
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    let log_file = tempfile::NamedTempFile::new().unwrap();
+
+    let target = scratch.path().join("unrelated"); // no cache match
+    let status = Command::new("mkdir")
+        .arg(&target)
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("GHOSTVOLUMES_LOG_FILE", log_file.path())
+        .env("GHOSTVOLUMES_DEBUG", "not-a-real-level")
         .env("LD_PRELOAD", compiled_shim())
         .status()
         .unwrap();
@@ -567,7 +597,7 @@ fn shim_never_writes_to_stdout_or_stderr_even_in_debug_mode() {
         .env("HOME", fake_home())
         .env("XDG_DATA_HOME", data_home.path())
         .env("GHOSTVOLUMES_LOG_FILE", log_file.path())
-        .env("GHOSTVOLUMES_DEBUG", "1")
+        .env("GHOSTVOLUMES_DEBUG", "debug")
         .env("LD_PRELOAD", compiled_shim())
         .output()
         .unwrap();
@@ -602,7 +632,7 @@ fn no_log_file_configured_or_writable_is_not_a_crash() {
         .env("HOME", fake_home())
         .env("XDG_DATA_HOME", data_home.path())
         .env("GHOSTVOLUMES_LOG_FILE", "/no/such/directory/shim.log")
-        .env("GHOSTVOLUMES_DEBUG", "1")
+        .env("GHOSTVOLUMES_DEBUG", "debug")
         .env("LD_PRELOAD", compiled_shim())
         .status()
         .unwrap();

@@ -12,6 +12,7 @@
 
 mod btrfs_core;
 mod cache_core;
+mod debug_core;
 mod decision_core;
 mod filenames_core;
 mod lock_core;
@@ -125,24 +126,22 @@ fn read_decision_file(path: &Path) -> Option<String> {
 
 struct LogContext {
     file: Option<Mutex<std::fs::File>>,
-    debug: bool,
+    verbosity: debug_core::Verbosity,
 }
 
-/// Resolves debug mode and the log file (§8.5) purely from environment
-/// variables — `GHOSTVOLUMES_DEBUG` (any value other than empty/`0`
-/// enables it) and `GHOSTVOLUMES_LOG_FILE` (defaults to
-/// `<data_dir>/shim.log` if unset). No TOML/config file involved: env
-/// vars are read live on every process start, so there's no compiled
-/// artifact that can go stale relative to a config file, and no
-/// hand-rolled file-format parsing to get subtly wrong for a setting
-/// this simple. A missing/unopenable log path degrades to "no
-/// logging," same never-panic-never-break-the-host-process posture as
-/// `load_cache`.
+/// Resolves verbosity and the log file (§8.5, leveled verbosity per
+/// `ai-work/tasks/leveled-verbosity.plan.md`) purely from environment
+/// variables — `GHOSTVOLUMES_DEBUG` (`error`/`warn`/`info`/`debug`/
+/// `trace`, default `info` — see `debug_core::configured_verbosity`)
+/// and `GHOSTVOLUMES_LOG_FILE` (defaults to `<data_dir>/shim.log` if
+/// unset). No TOML/config file involved: env vars are read live on
+/// every process start, so there's no compiled artifact that can go
+/// stale relative to a config file, and no hand-rolled file-format
+/// parsing to get subtly wrong for a setting this simple. A
+/// missing/unopenable log path degrades to "no logging," same
+/// never-panic-never-break-the-host-process posture as `load_cache`.
 fn load_log_context() -> LogContext {
-    let debug = match std::env::var("GHOSTVOLUMES_DEBUG") {
-        Ok(value) => !value.is_empty() && value != "0",
-        Err(_) => false,
-    };
+    let verbosity = debug_core::configured_verbosity();
 
     let log_path = std::env::var("GHOSTVOLUMES_LOG_FILE")
         .ok()
@@ -159,7 +158,7 @@ fn load_log_context() -> LogContext {
         })
         .map(Mutex::new);
 
-    LogContext { file, debug }
+    LogContext { file, verbosity }
 }
 
 /// `GHOSTVOLUMES_AUTO_YES` (ai-work/tasks/decision-model.plan.md §4):
@@ -186,18 +185,16 @@ fn log_ctx() -> &'static LogContext {
 /// prints to stdout/stderr under any circumstances — the shim runs
 /// injected into arbitrary host processes, and writing to their
 /// standard streams risks corrupting a TUI or polluting output the
-/// host process doesn't expect (§8.5).
-fn log_line(msg: &str) {
+/// host process doesn't expect (§8.5). `debug_core::format_line`
+/// renders the timestamp/pid/level head shared with the CLI's own
+/// trace output.
+fn log_line(level: debug_core::Verbosity, msg: &str) {
     let Some(file) = &log_ctx().file else {
         return;
     };
     let Ok(mut file) = file.lock() else {
         return;
     };
-    let unix_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     // One write_all call for the whole formatted line, not writeln!'s
     // multi-piece format string (each literal/argument is its own
     // write() syscall) - concurrent shim instances (e.g. many processes
@@ -206,24 +203,28 @@ fn log_line(msg: &str) {
     // `Mutex` above only serializes threads within *this* process; it's
     // this single-write_all that makes a line atomic across processes
     // too, on an O_APPEND-opened file.
-    let line = format!("[{unix_secs}] [pid {}] {msg}\n", std::process::id());
+    let line = format!("{}\n", debug_core::format_line(level, msg));
     let _ = file.write_all(line.as_bytes());
 }
 
-/// Always logged, in both normal and debug mode — reserved for
-/// critical/important events (a subvolume actually created, or an
-/// unexpected error), per §8.5's "normal mode logs only critical info."
+/// Logged whenever configured verbosity is `Info` or more verbose —
+/// reserved for critical/important events (a subvolume actually
+/// created, or an unexpected error), per §8.5's "normal mode logs only
+/// critical info." Always true at the default `Info` level; only
+/// suppressed if someone explicitly lowers verbosity to `warn`/`error`.
 fn log_important(msg: String) {
-    log_line(&msg);
+    if log_ctx().verbosity >= debug_core::Verbosity::Info {
+        log_line(debug_core::Verbosity::Info, &msg);
+    }
 }
 
-/// Only logged when debug mode is on — every interception decision and
-/// why, for troubleshooting "why did/didn't this become a subvolume."
-/// Takes a closure so the (never free) `format!` work only happens
-/// when debug mode is actually enabled.
+/// Only logged when verbosity is `Debug` or more verbose — every
+/// interception decision and why, for troubleshooting "why did/didn't
+/// this become a subvolume." Takes a closure so the (never free)
+/// `format!` work only happens when it'll actually be shown.
 fn log_debug(msg: impl FnOnce() -> String) {
-    if log_ctx().debug {
-        log_line(&msg());
+    if log_ctx().verbosity >= debug_core::Verbosity::Debug {
+        log_line(debug_core::Verbosity::Debug, &msg());
     }
 }
 

@@ -28,6 +28,18 @@ pub struct RootsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_watches: Option<Vec<String>>,
+    /// Directory names never even walked into by `convert`/`discover`
+    /// (Phase 2, `ai-work/tasks/convert-project-model.plan.md`) —
+    /// global only, sibling to `default_watches`, not per-root
+    /// overridable the same way: per-root/per-project ignores are
+    /// deliberately decentralized into `.ghostvolumes-ignore` files
+    /// instead (see `merge.rs`'s doc comment).
+    #[serde(
+        rename = "default-ignore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_ignore: Option<Vec<String>>,
     #[serde(flatten)]
     pub roots: BTreeMap<String, RawRootEntry>,
 }
@@ -64,8 +76,29 @@ mod tests {
         "#;
         let parsed = parse_roots(text).unwrap();
         assert_eq!(parsed.default_watches, None);
+        assert_eq!(parsed.default_ignore, None);
         assert_eq!(parsed.roots.len(), 3);
         assert_eq!(parsed.roots["/"], RawRootEntry::default());
+    }
+
+    #[test]
+    fn parses_default_ignore_as_a_top_level_sibling_of_default_watches() {
+        let text = r#"
+            default-watches = ["node_modules"]
+            default-ignore = [".git", ".hg", ".svn", ".snapshots"]
+
+            ["/home"]
+        "#;
+        let parsed = parse_roots(text).unwrap();
+        assert_eq!(
+            parsed.default_ignore,
+            Some(vec![
+                ".git".to_string(),
+                ".hg".to_string(),
+                ".svn".to_string(),
+                ".snapshots".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -126,6 +159,7 @@ mod tests {
         roots.insert("/".to_string(), RawRootEntry::default());
         let file = RootsFile {
             default_watches: Some(vec!["node_modules".to_string()]),
+            default_ignore: Some(vec![".git".to_string()]),
             roots,
         };
 

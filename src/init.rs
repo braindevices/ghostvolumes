@@ -19,7 +19,7 @@ const PRELOAD_SO: &[u8] = include_bytes!(concat!(
     env!("GHOSTVOLUMES_SHIM_FILE_NAME")
 ));
 
-const DEFAULT_WATCHES: &str = r#"default-watches = [
+const DEFAULTS_TOML: &str = r#"default-watches = [
     "node_modules",
     "target",
     ".venv",
@@ -28,6 +28,13 @@ const DEFAULT_WATCHES: &str = r#"default-watches = [
     ".uv-cache",
     ".ruff_cache",
     ".pytest_cache",
+]
+
+default-ignore = [
+    ".git",
+    ".hg",
+    ".svn",
+    ".snapshots",
 ]
 "#;
 
@@ -40,7 +47,7 @@ pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
         .join(filenames::ROOTS_D_DIR)
         .join(filenames::DEFAULT_WATCHES_FILE_NAME);
     if !defaults_path.exists() {
-        std::fs::write(&defaults_path, DEFAULT_WATCHES)?;
+        std::fs::write(&defaults_path, DEFAULTS_TOML)?;
     }
 
     Ok(())
@@ -87,6 +94,25 @@ mod tests {
         let written = std::fs::read(dirs.data_dir.join(filenames::SHIM_FILE_NAME)).unwrap();
         assert_eq!(written, PRELOAD_SO);
         assert!(!written.is_empty());
+    }
+
+    #[test]
+    fn writes_default_ignore_when_absent() {
+        let dirs = test_dirs();
+
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+
+        let text = std::fs::read_to_string(defaults_path(&dirs.config_dir)).unwrap();
+        let parsed = crate::config::parse_roots(&text).unwrap();
+        assert_eq!(
+            parsed.default_ignore,
+            Some(
+                vec![".git", ".hg", ".svn", ".snapshots"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
     }
 
     #[test]

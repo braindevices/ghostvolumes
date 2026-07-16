@@ -44,8 +44,16 @@ pub const ROOTS_D_DIR: &str = "roots.d";
 /// `scan --save`'s auto-generated roots file, within `ROOTS_D_DIR`.
 pub const AUTO_ROOTS_FILE_NAME: &str = "00-auto.toml";
 
-/// `init`'s default-watches skeleton, within `ROOTS_D_DIR`.
+/// `init`'s default-watches/default-ignore skeleton, within `ROOTS_D_DIR`.
 pub const DEFAULT_WATCHES_FILE_NAME: &str = "00-defaults.toml";
+
+/// The ignore-pattern file name (Phase 2, `ai-work/tasks/convert-project-model.plan.md`) —
+/// same gitignore-style pattern grammar as `DECISION_FILE_NAME`, but no
+/// `+`/`-`/`?` prefix, and it exists only at one boundary location
+/// (a volume root or a project root), never walked up through every
+/// intermediate directory. CLI-only, not in `shim/filenames_core.rs` —
+/// the shim never walks a directory tree, only `convert`/`discover` do.
+pub const IGNORE_FILE_NAME: &str = ".ghostvolumes-ignore";
 
 /// Guards `reload()`/`scan --save`'s whole read-merge-validate-write
 /// sequence (ai-work/tasks/atomic-file-io.plan.md §1) — CLI-only, since

@@ -6,6 +6,17 @@
 //! git-tracked gating (VCS detection was dropped entirely — the only
 //! safety net is now an explicit, recorded human decision, same as
 //! everywhere else in this design).
+//!
+//! `ignore_patterns` (Phase 2, `ai-work/tasks/convert-project-model.plan.md`)
+//! replaces what used to be a hardcoded `.git`-only skip — matched via
+//! `decision::ignore_matches`, anchored to each directory's own
+//! immediate parent as the walk descends (this only matters for an
+//! anchored pattern; a bare name like `.git` matches by leaf name alone
+//! regardless of anchor). Deliberately global-only here: `discover`
+//! isn't tied to any one registered project the way `convert` is (it
+//! walks an arbitrary starting path, `~` by default), so only the
+//! `default-ignore` tier applies — no volume-root/project-root
+//! `.ghostvolumes-ignore` file lookup, unlike `convert`'s walk.
 
 use std::path::{Path, PathBuf};
 
@@ -16,18 +27,26 @@ pub struct DiscoveredMatch {
     pub name: String,
 }
 
-/// Stat-walks from `start` (skipping `.git`, never descending into a
-/// watched-name match whether or not it turns out to be a subvolume —
-/// walking into a multi-gigabyte `node_modules` tree looking for more
-/// matches would be pointless and slow), recording every watched-name
-/// entry that's a real subvolume (inode 256).
+/// Stat-walks from `start` (skipping anything matching `ignore_patterns`,
+/// never descending into a watched-name match whether or not it turns
+/// out to be a subvolume — walking into a multi-gigabyte `node_modules`
+/// tree looking for more matches would be pointless and slow), recording
+/// every watched-name entry that's a real subvolume (inode 256).
 pub fn walk(
     start: &Path,
     max_depth: Option<u32>,
     watched_names: &[String],
+    ignore_patterns: &[String],
 ) -> Vec<DiscoveredMatch> {
     let mut matches = Vec::new();
-    walk_inner(start, max_depth, watched_names, 0, &mut matches);
+    walk_inner(
+        start,
+        max_depth,
+        watched_names,
+        ignore_patterns,
+        0,
+        &mut matches,
+    );
     matches
 }
 
@@ -35,6 +54,7 @@ fn walk_inner(
     dir: &Path,
     max_depth: Option<u32>,
     watched_names: &[String],
+    ignore_patterns: &[String],
     depth: u32,
     matches: &mut Vec<DiscoveredMatch>,
 ) {
@@ -55,10 +75,10 @@ fn walk_inner(
         }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str == ".git" {
+        let path = entry.path();
+        if crate::decision::ignore_matches(ignore_patterns, dir, &path) {
             continue;
         }
-        let path = entry.path();
         if watched_names.iter().any(|w| w == name_str.as_ref()) {
             if btrfs::is_subvolume(&path).unwrap_or(false) {
                 matches.push(DiscoveredMatch {
@@ -68,7 +88,14 @@ fn walk_inner(
             }
             continue; // never descend into a watched-name match
         }
-        walk_inner(&path, max_depth, watched_names, depth + 1, matches);
+        walk_inner(
+            &path,
+            max_depth,
+            watched_names,
+            ignore_patterns,
+            depth + 1,
+            matches,
+        );
     }
 }
 
@@ -130,7 +157,7 @@ mod tests {
         let dir = btrfs_scratch_dir();
         btrfs::create_subvolume(dir.path(), "node_modules").unwrap();
 
-        let matches = walk(dir.path(), None, &watched());
+        let matches = walk(dir.path(), None, &watched(), &[]);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].parent, dir.path());
         assert_eq!(matches[0].name, "node_modules");
@@ -141,7 +168,7 @@ mod tests {
         let dir = btrfs_scratch_dir();
         std::fs::create_dir(dir.path().join("node_modules")).unwrap();
 
-        assert!(walk(dir.path(), None, &watched()).is_empty());
+        assert!(walk(dir.path(), None, &watched(), &[]).is_empty());
     }
 
     #[test]
@@ -152,18 +179,53 @@ mod tests {
         // "target" subvolume too - it must not.
         btrfs::create_subvolume(&dir.path().join("node_modules"), "target").unwrap();
 
-        let matches = walk(dir.path(), None, &watched());
+        let matches = walk(dir.path(), None, &watched(), &[]);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].name, "node_modules");
     }
 
     #[test]
-    fn skips_dot_git_directory() {
+    fn a_configured_ignore_pattern_is_never_descended_into() {
         let dir = btrfs_scratch_dir();
         std::fs::create_dir_all(dir.path().join(".git/node_modules")).unwrap();
         // Even if it were a subvolume, .git itself must never be
-        // descended into.
-        assert!(walk(dir.path(), None, &watched()).is_empty());
+        // descended into - once it's actually configured as an ignore
+        // pattern (unlike the bare name below, which isn't).
+        assert!(walk(dir.path(), None, &watched(), &[".git".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn without_a_matching_ignore_pattern_a_dot_directory_is_walked_into_like_any_other() {
+        // The generalization this guards: `.git` has no special status
+        // in the walk itself anymore - it's only skipped because
+        // `default-ignore` names it, same as any other configured
+        // pattern.
+        let dir = btrfs_scratch_dir();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        btrfs::create_subvolume(&dir.path().join(".git"), "node_modules").unwrap();
+
+        let matches = walk(dir.path(), None, &watched(), &[]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].parent, dir.path().join(".git"));
+    }
+
+    #[test]
+    fn a_custom_ignore_pattern_is_never_descended_into() {
+        let dir = btrfs_scratch_dir();
+        std::fs::create_dir_all(dir.path().join(".hg/target")).unwrap();
+
+        assert!(walk(dir.path(), None, &watched(), &[".hg".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn an_ignore_pattern_skips_even_a_watched_name_match() {
+        // Ignoring is checked before the watched-name check at all - a
+        // `.ghostvolumes-ignore`'d directory is skipped even if it would
+        // otherwise match a watched name.
+        let dir = btrfs_scratch_dir();
+        btrfs::create_subvolume(dir.path(), "node_modules").unwrap();
+
+        assert!(walk(dir.path(), None, &watched(), &["node_modules".to_string()]).is_empty());
     }
 
     #[test]
@@ -172,7 +234,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("projects/app")).unwrap();
         btrfs::create_subvolume(&dir.path().join("projects/app"), "target").unwrap();
 
-        let matches = walk(dir.path(), None, &watched());
+        let matches = walk(dir.path(), None, &watched(), &[]);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].parent, dir.path().join("projects/app"));
         assert_eq!(matches[0].name, "target");
@@ -185,8 +247,8 @@ mod tests {
         btrfs::create_subvolume(&dir.path().join("a/b/c"), "target").unwrap();
 
         // depth 0 = dir itself, 1 = a/, 2 = a/b/, 3 = a/b/c/ contents
-        assert!(walk(dir.path(), Some(2), &watched()).is_empty());
-        assert_eq!(walk(dir.path(), Some(3), &watched()).len(), 1);
+        assert!(walk(dir.path(), Some(2), &watched(), &[]).is_empty());
+        assert_eq!(walk(dir.path(), Some(3), &watched(), &[]).len(), 1);
     }
 
     #[test]

@@ -23,6 +23,8 @@ mod config;
 #[cfg(target_os = "linux")]
 mod convert;
 #[cfg(target_os = "linux")]
+mod debug;
+#[cfg(target_os = "linux")]
 mod decision;
 #[cfg(target_os = "linux")]
 mod discover;
@@ -123,11 +125,22 @@ enum Command {
         #[arg(long)]
         save: bool,
     },
-    /// Recursively find and resolve subvolume candidates under path
+    /// Recursively find and resolve subvolume candidates under a project
     Convert {
+        /// The project: a decision-file/project-roots boundary, never
+        /// itself converted
         path: String,
         #[arg(long)]
         max_depth: Option<u32>,
+        /// Explicit target (relative to path) to resolve directly,
+        /// bypassing the watched-name check - repeatable
+        #[arg(long = "create")]
+        create: Vec<String>,
+        /// Print what would happen without changing anything - never
+        /// prompts, never touches the filesystem, the decision file,
+        /// or the project-roots list
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Manage the registered project-roots list
     Projects {
@@ -260,7 +273,12 @@ fn main() -> anyhow::Result<()> {
                 None => PathBuf::from(std::env::var("HOME")?),
             };
             let merged = merge::load_all(&config_dir)?;
-            let matches = discover::walk(&start, max_depth, &merged.all_watched_names());
+            let matches = discover::walk(
+                &start,
+                max_depth,
+                &merged.all_watched_names(),
+                &merged.ignore,
+            );
             let suggestions = discover::group_by_parent(matches);
             if save {
                 for s in &suggestions {
@@ -294,16 +312,30 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::Convert { path, max_depth } => {
+        Command::Convert {
+            path,
+            max_depth,
+            create,
+            dry_run,
+        } => {
+            let config_dir = xdg::config_dir()?;
             let data_dir = xdg::data_dir()?;
             let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
             let project_roots_path = data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME);
+            let project_path = absolutize(&path)?;
+            // Relative to the project, not independently absolutized -
+            // `--create` names something *under* the project being
+            // pointed at, not an arbitrary unrelated filesystem path.
+            let create_paths: Vec<PathBuf> = create.iter().map(|c| project_path.join(c)).collect();
             convert::convert(
-                &absolutize(&path)?,
+                &project_path,
+                &create_paths,
                 max_depth,
+                &config_dir,
                 &cache_path,
                 &project_roots_path,
                 &data_dir,
+                dry_run,
             )
         }
         Command::Projects { action } => {

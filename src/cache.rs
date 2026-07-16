@@ -58,6 +58,7 @@ mod compile_tests {
                     "build".to_string(),
                 ],
             }],
+            ignore: Vec::new(),
         }
     }
 
@@ -98,6 +99,7 @@ mod compile_tests {
                     watches: vec!["node_modules".to_string()],
                 },
             ],
+            ignore: Vec::new(),
         };
         let text = compile(&config);
         assert_eq!(
@@ -126,6 +128,7 @@ mod compile_tests {
                     watches: vec!["dist".to_string()],
                 },
             ],
+            ignore: Vec::new(),
         };
         let text = compile(&config);
         assert_eq!(text, "/\tnode_modules\n/home\tdist\n");

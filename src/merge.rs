@@ -10,6 +10,16 @@
 //! the plan doc). `watched.d` and `projects.d` (per-project config) were
 //! both removed — decision files are the entire per-project mechanism
 //! now.
+//!
+//! `default-ignore` (Phase 2, `ai-work/tasks/convert-project-model.plan.md`)
+//! merges the same last-file-wins way as `default-watches`, but stays
+//! global-only — there's no per-root `["/path"] ignore = [...]`
+//! override the way `watches` has. Per-root/per-project ignore patterns
+//! are deliberately decentralized instead, into a `.ghostvolumes-ignore`
+//! file living directly at that one root or project boundary (not
+//! merged across files, not walked up through every intermediate
+//! directory) — `convert`/`discover` read those files directly, not
+//! through this module.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -30,6 +40,9 @@ pub struct ResolvedRoot {
 #[derive(Debug, PartialEq, Default)]
 pub struct MergedConfig {
     pub roots: Vec<ResolvedRoot>,
+    /// The fully-merged `default-ignore` list (last file wins, same as
+    /// `default-watches`) — global, not per-root.
+    pub ignore: Vec<String>,
 }
 
 impl MergedConfig {
@@ -67,6 +80,7 @@ fn list_toml_files(dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
 
 fn load_roots_dir(dir: &Path) -> anyhow::Result<MergedConfig> {
     let mut default_watches: Vec<String> = Vec::new();
+    let mut default_ignore: Vec<String> = Vec::new();
     let mut roots: BTreeMap<String, config::RawRootEntry> = BTreeMap::new();
 
     for file in list_toml_files(dir)? {
@@ -74,6 +88,9 @@ fn load_roots_dir(dir: &Path) -> anyhow::Result<MergedConfig> {
         let parsed = config::parse_roots(&text)?;
         if let Some(dw) = parsed.default_watches {
             default_watches = dw;
+        }
+        if let Some(di) = parsed.default_ignore {
+            default_ignore = di;
         }
         for (path, entry) in parsed.roots {
             let merged_entry = roots.entry(path).or_default();
@@ -95,7 +112,10 @@ fn load_roots_dir(dir: &Path) -> anyhow::Result<MergedConfig> {
         })
         .collect();
 
-    Ok(MergedConfig { roots: resolved })
+    Ok(MergedConfig {
+        roots: resolved,
+        ignore: default_ignore,
+    })
 }
 
 /// Loads `roots.d/` under `config_dir` (e.g. `~/.config/ghostvolumes`).
@@ -295,11 +315,36 @@ mod tests {
                     watches: names(&["target", "dist"]),
                 },
             ],
+            ignore: Vec::new(),
         };
         assert_eq!(
             config.all_watched_names(),
             names(&["dist", "node_modules", "target"])
         );
+    }
+
+    #[test]
+    fn default_ignore_falls_through_when_no_file_mentions_it() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "10-local.toml", r#"["/home"]"#);
+
+        let merged = load_roots_dir(dir.path()).unwrap();
+        assert!(merged.ignore.is_empty());
+    }
+
+    #[test]
+    fn default_ignore_is_merged_last_file_wins_same_as_default_watches() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "00-defaults.toml",
+            r#"default-ignore = [".git", ".hg"]"#,
+        );
+        write(dir.path(), "10-local.toml", r#"default-ignore = [".svn"]"#);
+        write(dir.path(), "20-more.toml", r#"["/home"]"#);
+
+        let merged = load_roots_dir(dir.path()).unwrap();
+        assert_eq!(merged.ignore, vec![".svn".to_string()]);
     }
 
     #[test]
