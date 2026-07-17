@@ -26,9 +26,10 @@
 //! providing anything a single, correct stopping boundary doesn't
 //! already give.
 //!
-//! Two ways a path becomes a candidate:
-//! - The walk: every directory under `<path>` matching a watched name
-//!   under a configured root (`find_nested_candidates`, reusing
+//! Three ways a path becomes a candidate:
+//! - The walk: every directory under `<path>` that's either a watched
+//!   name under a configured root, or already a real BTRFS subvolume
+//!   regardless of its name (`find_nested_candidates`, reusing
 //!   `discover`'s tree-walking conventions — skip anything matching an
 //!   ignore pattern, optional `--max-depth`, never descend into a
 //!   match). Ignore patterns (Phase 2,
@@ -42,6 +43,15 @@
 //!   direct replacement for what naming `<path>` itself used to do,
 //!   now unambiguous since the project and its candidates are
 //!   structurally different things (positional argument vs. flag).
+//! - `decision_file_anchored_candidates`: any anchored, wildcard-free
+//!   `+`/`?` pattern already in `boundary`'s own decision file —
+//!   surfaces something the walk could never discover on its own,
+//!   because its target doesn't exist on disk yet or doesn't match any
+//!   watched name at all. An anchored `+` decision is the *persisted*
+//!   equivalent of `--create`: recording it once keeps being honored
+//!   on every future run, not just the one where `--create` was
+//!   passed — without this, a decision for an unwatched, not-yet-
+//!   created name would silently never actually get materialized.
 //!
 //! Each candidate, resolved shallowest-first (so an "every match of
 //! this name" answer for a shallow candidate is already reflected by
@@ -94,6 +104,47 @@ use std::process::Command;
 use crate::debug::{Verbosity, trace};
 use crate::{btrfs, cache, decision, filenames, merge, project_roots, projects};
 
+/// What resolving a candidate's decision should actually *do*, decomposed
+/// into two independent capabilities
+/// (`ai-work/tasks/decide-walk-and-markers.plan.md`) — `convert` and
+/// `decide` are just two of the four combinations; a hypothetical
+/// future "apply only what's already decided, ignore anything
+/// undecided" mode (`Mode { decide: false, convert: true }`) needs no
+/// further plumbing changes when it's ever wanted. Named fields, not
+/// two bare positional `bool`s, so a call site can't silently swap
+/// them with nothing catching it at compile time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mode {
+    /// Consider undecided candidates at all — ask (if a TTY) or leave
+    /// a pending `?` marker (if not). `false` means anything without
+    /// an existing decision is silently skipped, no marker either —
+    /// this is a genuinely different outcome than "asked, but no TTY
+    /// available" (which still leaves a marker), not the same thing;
+    /// `is_tty` stays its own, separate parameter for exactly this
+    /// reason — it answers "can we get a real answer right now", not
+    /// "do we want one at all".
+    decide: bool,
+    /// Actually materialize an approved candidate (an existing `+`, or
+    /// a freshly-answered "yes"). `false` means only ever record or
+    /// toggle the decision — never touch the filesystem.
+    convert: bool,
+}
+
+impl Mode {
+    /// `convert`'s own behavior: ask about (or apply) a decision, then
+    /// actually materialize it.
+    const CONVERT: Mode = Mode {
+        decide: true,
+        convert: true,
+    };
+    /// `decide`'s own behavior: ask about (or apply) a decision, but
+    /// never touch the filesystem either way.
+    const DECIDE: Mode = Mode {
+        decide: true,
+        convert: false,
+    };
+}
+
 enum RememberChoice {
     Deny,
     JustThisPath,
@@ -108,15 +159,23 @@ fn parse_remember_answer(line: &str) -> RememberChoice {
     }
 }
 
-/// Asks the "convert (and remember)?" question and parses the answer -
-/// always actually asks, unlike `confirm_override`. Whether to ask at
-/// all based on `is_tty` is the caller's call (`ask_and_maybe_convert`),
-/// since a non-interactive run needs a different fallback (a pending
-/// marker, not a recorded deny) than an interactive "no" does - a
-/// distinction this function doesn't need to know about.
-fn ask_remember(candidate: &Path, read_line: impl FnOnce() -> Option<String>) -> RememberChoice {
+/// Asks the "convert (and remember)?"/"decide (and remember)?"
+/// question and parses the answer - always actually asks, unlike
+/// `confirm_override`. Whether to ask at all based on `is_tty` is the
+/// caller's call (`ask_and_maybe_convert`), since a non-interactive run
+/// needs a different fallback (a pending marker, not a recorded deny)
+/// than an interactive "no" does - a distinction this function doesn't
+/// need to know about. The verb in the prompt is `mode`-aware -
+/// asking "Convert...?" when `decide` will never actually convert,
+/// even on "yes", would be misleading.
+fn ask_remember(
+    candidate: &Path,
+    mode: Mode,
+    read_line: impl FnOnce() -> Option<String>,
+) -> RememberChoice {
+    let verb = if mode.convert { "Convert" } else { "Decide" };
     eprint!(
-        "Convert (and remember this decision for) {}? [y]es, just this path / [a]ll matches of this name / [N]o: ",
+        "{verb} (and remember this decision for) {}? [y]es, just this path / [a]ll matches of this name / [N]o: ",
         candidate.display()
     );
     let _ = std::io::stderr().flush();
@@ -144,6 +203,33 @@ fn confirm_override(
     let _ = std::io::stderr().flush();
     match read_line() {
         Some(line) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        None => false,
+    }
+}
+
+/// Asks about an already-a-subvolume candidate that has no recorded
+/// decision at all — states the reason outright (unlike `ask_remember`'s
+/// generic "convert (and remember)?", there's nothing left to convert
+/// here, only a decision to record). Defaults to **yes** on an empty
+/// answer, unlike every other ask in this file (which defaults to
+/// declining, since it gates an actual filesystem mutation) — in the
+/// overwhelming common case a directory that's already a real
+/// subvolume was made that way specifically to hold volatile build
+/// output, not by accident.
+fn ask_about_existing_subvolume(
+    candidate: &Path,
+    read_line: impl FnOnce() -> Option<String>,
+) -> bool {
+    eprint!(
+        "{} is already a subvolume with no recorded decision — record + for it? [Y/n]: ",
+        candidate.display()
+    );
+    let _ = std::io::stderr().flush();
+    match read_line() {
+        Some(line) => {
+            let trimmed = line.trim().to_ascii_lowercase();
+            trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+        }
         None => false,
     }
 }
@@ -352,6 +438,7 @@ fn ask_and_maybe_convert(
     boundary: &Path,
     data_dir: &Path,
     is_tty: bool,
+    mode: Mode,
     read_line: &mut impl FnMut() -> Option<String>,
 ) -> anyhow::Result<()> {
     let anchored = decision::anchored_pattern(boundary, candidate)
@@ -368,7 +455,7 @@ fn ask_and_maybe_convert(
         );
         return append_pending_marker(data_dir, boundary, candidate);
     }
-    let choice = ask_remember(candidate, read_line);
+    let choice = ask_remember(candidate, mode, read_line);
     let pattern = match choice {
         RememberChoice::Deny => {
             return record_decision(data_dir, boundary, &anchored, &anchored, "-");
@@ -383,7 +470,9 @@ fn ask_and_maybe_convert(
             containing_dir_pattern(boundary, candidate, &name)
         }
     };
-    materialize(candidate, boundary, data_dir)?;
+    if mode.convert {
+        materialize(candidate, boundary, data_dir)?;
+    }
     record_decision(data_dir, boundary, &anchored, &pattern, "+")
 }
 
@@ -565,16 +654,38 @@ fn is_ignored(
     false
 }
 
+/// Every candidate implied by an anchored, wildcard-free `+`/`?`
+/// pattern in `boundary`'s own decision file — surfaces something the
+/// filesystem walk could never discover on its own, because its target
+/// doesn't exist on disk yet, or doesn't match any watched name at all
+/// (an anchored `+` decision is the *persisted* equivalent of
+/// `--create`: recording it once should keep being honored on every
+/// future run, not just the one where `--create` was passed). Shared
+/// by `convert` and `decide` — the only difference between them is
+/// `Mode`, same as everywhere else in the per-candidate resolution.
+fn decision_file_anchored_candidates(boundary: &Path) -> Vec<PathBuf> {
+    let text =
+        std::fs::read_to_string(boundary.join(filenames::DECISION_FILE_NAME)).unwrap_or_default();
+    decision::parse_anchored_exact_patterns(&text)
+        .into_iter()
+        .map(|pattern| boundary.join(pattern.trim_start_matches('/')))
+        .collect()
+}
+
 /// Walks `project_path`'s subtree (skipping anything `is_ignored`,
 /// never descending into a match — same conventions as
-/// `discover::walk`), collecting every directory whose name is watched
-/// under a configured root at its own location (`cache::names_for`,
-/// which is root-scoped, so this naturally excludes anything outside
-/// every configured root). `project_path` itself is not included — the
-/// caller already knows never to treat it as a candidate. `boundary` is
-/// the resolved `decision_boundary` for this run, threaded through
-/// separately from the walk's own recursion cursor purely for
-/// `is_ignored`'s project-root ignore-file tier.
+/// `discover::walk`), collecting every directory that's either a
+/// watched name under a configured root at its own location
+/// (`cache::names_for`, which is root-scoped, so this naturally
+/// excludes anything outside every configured root) *or* already a
+/// real BTRFS subvolume regardless of its name — an existing subvolume
+/// is itself evidence someone already decided to convert it, whether
+/// or not its name is (or ever was) on the watch list.
+/// `project_path` itself is not included — the caller already knows
+/// never to treat it as a candidate. `boundary` is the resolved
+/// `decision_boundary` for this run, threaded through separately from
+/// the walk's own recursion cursor purely for `is_ignored`'s
+/// project-root ignore-file tier.
 fn find_nested_candidates(
     project_path: &Path,
     boundary: &Path,
@@ -627,7 +738,16 @@ fn find_nested_candidates_inner(
         if is_ignored(rows, boundary, global_ignore, &path) {
             continue;
         }
-        if names.contains(name_str.as_ref()) {
+        // A real, already-existing subvolume is itself direct evidence
+        // someone already decided to convert it - a candidate
+        // regardless of whether its name happens to be on the watch
+        // list right now (a name could've been watched when it was
+        // created and removed from the list since, or converted by
+        // hand for a name nobody thought to add at all).
+        // `resolve_candidate` asks about it (defaulting to yes) if it
+        // has no decision yet - never descended into either way, same
+        // as a watched-name match.
+        if names.contains(name_str.as_ref()) || btrfs::is_subvolume(&path).unwrap_or(false) {
             out.push(path);
             continue; // never descend into a match
         }
@@ -674,6 +794,7 @@ fn report_would_materialize(candidate: &Path) {
 /// gated by verbosity) since it's the direct, primary output of the
 /// command, the same way a real run's `create:`/`cp -a:`/`rename:`
 /// lines already are.
+#[allow(clippy::too_many_arguments)]
 fn resolve_candidate(
     candidate: &Path,
     boundary: &Path,
@@ -681,21 +802,79 @@ fn resolve_candidate(
     data_dir: &Path,
     is_tty: bool,
     dry_run: bool,
+    mode: Mode,
     mut read_line: &mut impl FnMut() -> Option<String>,
 ) -> anyhow::Result<()> {
-    if btrfs::is_subvolume(candidate).unwrap_or(false) {
-        trace(Verbosity::Debug, || {
-            format!("{}: already a subvolume, skip", candidate.display())
-        });
-        return Ok(());
-    }
-
     let existing_decision = decision::resolve(
         candidate,
         boundary,
         filenames::DECISION_FILE_NAME,
         read_decision_file,
     );
+
+    if btrfs::is_subvolume(candidate).unwrap_or(false) {
+        if existing_decision.is_some() {
+            trace(Verbosity::Debug, || {
+                format!(
+                    "{}: already a subvolume, decision already recorded -> skip",
+                    candidate.display()
+                )
+            });
+            return Ok(());
+        }
+        // Manually converted (or converted by a prior run before this
+        // candidate had a decision) - there's nothing left to
+        // *convert*, only a decision to record, so this is treated as
+        // its own undecided candidate: same TTY/no-TTY split as any
+        // other one, but the "yes" path never calls `materialize` -
+        // the desired end state already holds (and would be actively
+        // wrong to try: `copy_and_swap`'s final `remove_dir_all` can't
+        // remove a real subvolume, that needs `BTRFS_IOC_SNAP_DESTROY`,
+        // not a plain `rmdir()`).
+        if !mode.decide {
+            trace(Verbosity::Debug, || {
+                format!(
+                    "{}: already a subvolume, undecided, decide disabled -> skip",
+                    candidate.display()
+                )
+            });
+            return Ok(());
+        }
+        trace(Verbosity::Debug, || {
+            format!(
+                "{}: already a subvolume, undecided -> ask (default yes) or pending marker",
+                candidate.display()
+            )
+        });
+        if dry_run {
+            println!(
+                "already a subvolume, undecided: {} (skipped — dry run)",
+                candidate.display()
+            );
+            return Ok(());
+        }
+        let anchored = decision::anchored_pattern(boundary, candidate)
+            .unwrap_or_else(|| candidate.display().to_string());
+        if !is_tty {
+            println!(
+                "skip: {} (already a subvolume, undecided — run with a TTY to decide, or edit the decision file by hand)",
+                candidate.display()
+            );
+            return append_pending_marker(data_dir, boundary, candidate);
+        }
+        if ask_about_existing_subvolume(candidate, read_line) {
+            record_decision(data_dir, boundary, &anchored, &anchored, "+")?;
+            println!(
+                "recorded: + {anchored} (at {}, already a subvolume)",
+                boundary.display()
+            );
+        } else {
+            record_decision(data_dir, boundary, &anchored, &anchored, "-")?;
+            println!("recorded: - {anchored} (at {})", boundary.display());
+        }
+        return Ok(());
+    }
+
     // Every candidate is either an explicit `--create` target or
     // discovered by the walk (which only ever finds watched-name
     // matches) - `project_path` itself is never a candidate at all
@@ -705,6 +884,16 @@ fn resolve_candidate(
 
     match existing_decision {
         Some(true) => {
+            if !mode.convert {
+                trace(Verbosity::Debug, || {
+                    format!(
+                        "{}: existing + decision at boundary {} -> convert disabled, no-op",
+                        candidate.display(),
+                        boundary.display()
+                    )
+                });
+                return Ok(());
+            }
             trace(Verbosity::Debug, || {
                 format!(
                     "{}: existing + decision at boundary {} -> materialize",
@@ -746,9 +935,19 @@ fn resolve_candidate(
             if !confirm_override(candidate, is_tty, &mut read_line) {
                 return Ok(());
             }
-            ask_and_maybe_convert(candidate, boundary, data_dir, is_tty, read_line)
+            ask_and_maybe_convert(candidate, boundary, data_dir, is_tty, mode, read_line)
         }
         None => {
+            if !mode.decide {
+                trace(Verbosity::Debug, || {
+                    format!(
+                        "{}: undecided at boundary {}, decide disabled -> skip silently, no marker",
+                        candidate.display(),
+                        boundary.display()
+                    )
+                });
+                return Ok(());
+            }
             trace(Verbosity::Debug, || {
                 format!(
                     "{}: undecided at boundary {} -> ask",
@@ -760,7 +959,7 @@ fn resolve_candidate(
                 println!("undecided: {} (skipped — dry run)", candidate.display());
                 return Ok(());
             }
-            ask_and_maybe_convert(candidate, boundary, data_dir, is_tty, read_line)
+            ask_and_maybe_convert(candidate, boundary, data_dir, is_tty, mode, read_line)
         }
     }
 }
@@ -864,14 +1063,26 @@ fn ensure_project_registered(
 ) -> anyhow::Result<()> {
     let is_ancestor_or_self_same_volume =
         |root: &str| path.starts_with(Path::new(root)) && same_volume(rows, Path::new(root), path);
-    if project_roots
+    if let Some(covering) = project_roots
         .iter()
-        .any(|r| is_ancestor_or_self_same_volume(r))
+        .find(|r| is_ancestor_or_self_same_volume(r))
     {
+        trace(Verbosity::Debug, || {
+            format!(
+                "{}: already covered by registered project {covering} (same volume) -> no-op",
+                path.display()
+            )
+        });
         return Ok(()); // covered by an existing, same-volume project already
     }
 
     if dry_run {
+        trace(Verbosity::Debug, || {
+            format!(
+                "{}: not covered by any registered project -> would register (dry run)",
+                path.display()
+            )
+        });
         println!(
             "would register: {} as a project (skipped — dry run)",
             path.display()
@@ -890,6 +1101,13 @@ fn ensure_project_registered(
 
     if !conflicting_children.is_empty() {
         let list = conflicting_children.join(", ");
+        trace(Verbosity::Debug, || {
+            format!(
+                "{}: not covered, but registering would nest over already-registered project(s) \
+                 {list} (same volume) -> ask to unregister them",
+                path.display()
+            )
+        });
         if !is_tty {
             anyhow::bail!(
                 "{} is not covered by any registered project, and registering it would nest over \
@@ -928,6 +1146,14 @@ fn ensure_project_registered(
     let orphan = nearest_ancestor_decision_file(path, volume.as_deref());
 
     if let Some(ancestor) = &orphan {
+        trace(Verbosity::Debug, || {
+            format!(
+                "{}: not covered, no nesting conflict, but an orphaned decision file exists at \
+                 {} -> ask before registering",
+                path.display(),
+                ancestor.display()
+            )
+        });
         if !is_tty {
             anyhow::bail!(
                 "{} is not covered by any registered project, and there's no TTY to ask — a \
@@ -962,6 +1188,12 @@ fn ensure_project_registered(
         return register_project_root(path, project_roots, project_roots_path);
     }
 
+    trace(Verbosity::Debug, || {
+        format!(
+            "{}: not covered, no nesting conflict, no orphaned decision file -> plain register ask",
+            path.display()
+        )
+    });
     if !is_tty {
         anyhow::bail!(
             "{} is not a registered project, and there's no TTY to ask — \
@@ -1057,7 +1289,11 @@ fn convert_with_io(
     // see its own doc comment for why the fallback below still matches).
     let boundary = decision_boundary(&rows, &project_roots, path);
 
-    let mut candidates: Vec<PathBuf> = create.to_vec();
+    // A `BTreeSet` dedupes across all three sources (`--create`, the
+    // walk, and any anchored decision-file pattern with no matching
+    // watched-name/existing-target) before the final shallowest-first
+    // ordering below.
+    let mut candidates: std::collections::BTreeSet<PathBuf> = create.iter().cloned().collect();
     if path.is_dir() {
         candidates.extend(find_nested_candidates(
             path,
@@ -1067,6 +1303,8 @@ fn convert_with_io(
             &global_ignore,
         ));
     }
+    candidates.extend(decision_file_anchored_candidates(&boundary));
+    let mut candidates: Vec<PathBuf> = candidates.into_iter().collect();
     // Shallowest first (§6): an "every match of this name" answer for a
     // shallow candidate must already be reflected by the time a
     // same-named, `**`-covered deeper one is resolved.
@@ -1074,9 +1312,167 @@ fn convert_with_io(
 
     for candidate in &candidates {
         resolve_candidate(
-            candidate, &boundary, create, data_dir, is_tty, dry_run, read_line,
+            candidate,
+            &boundary,
+            create,
+            data_dir,
+            is_tty,
+            dry_run,
+            Mode::CONVERT,
+            read_line,
         )?;
     }
+    Ok(())
+}
+
+/// `ghostvolumes decide <path> [--max-depth N] --add <pattern> --deny
+/// <pattern>` (Phase 4, `ai-work/tasks/convert-project-model.plan.md`,
+/// revised per `ai-work/tasks/decide-walk-and-markers.plan.md`): same
+/// walk-and-resolve engine as `convert` (same upfront registration,
+/// same boundary resolution, same `find_nested_candidates` walk, same
+/// per-candidate decision resolution and prompting) — the only
+/// difference is the mode (`Mode::DECIDE`): an existing `+` is a no-op
+/// instead of a re-materialize, and a freshly-answered "yes" only
+/// records the decision, never touches the filesystem. No `--create`,
+/// unlike `convert` — naming something explicitly to *materialize*
+/// conflicts with `decide`'s whole contract.
+///
+/// Two things happen, in order:
+/// 1. Each `--add`/`--deny` pattern is recorded verbatim (no anchoring
+///    or broadening computed, since the human is directly specifying
+///    the pattern) — the original Phase 4 "hand-author ahead of time"
+///    behavior. Each pattern also doubles as `record_decision`'s own
+///    search key for an existing pending `?` marker with that *exact*
+///    pattern — an exact-string coincidence, not a re-derivation, but
+///    it means hand-typing the same pattern a prior undecided
+///    candidate left behind toggles that line in place.
+/// 2. Candidates are gathered exactly like `convert`'s own (the
+///    filesystem walk, plus `decision_file_anchored_candidates` —
+///    anything an anchored `+`/`?` pattern implies that the walk alone
+///    could never discover, most commonly because its target doesn't
+///    exist on disk yet) and resolved the same way: anything step 1
+///    already covers resolves via ordinary `decision::resolve`, no
+///    separate filter needed; anything still undecided gets asked
+///    about (or left pending, non-interactively).
+#[allow(clippy::too_many_arguments)]
+pub fn decide(
+    path: &Path,
+    add: &[String],
+    deny: &[String],
+    max_depth: Option<u32>,
+    config_dir: &Path,
+    cache_path: &Path,
+    project_roots_path: &Path,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let mut read_line = read_stdin_line;
+    decide_with_io(
+        path,
+        add,
+        deny,
+        max_depth,
+        config_dir,
+        cache_path,
+        project_roots_path,
+        data_dir,
+        std::io::stdin().is_terminal(),
+        &mut read_line,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_with_io(
+    path: &Path,
+    add: &[String],
+    deny: &[String],
+    max_depth: Option<u32>,
+    config_dir: &Path,
+    cache_path: &Path,
+    project_roots_path: &Path,
+    data_dir: &Path,
+    is_tty: bool,
+    read_line: &mut impl FnMut() -> Option<String>,
+) -> anyhow::Result<()> {
+    if path.exists() && !path.is_dir() {
+        anyhow::bail!("{} is not a directory", path.display());
+    }
+    let rows = cache::parse(&std::fs::read_to_string(cache_path).unwrap_or_default());
+    let mut project_roots =
+        project_roots::parse(&std::fs::read_to_string(project_roots_path).unwrap_or_default());
+    let global_ignore = merge::load_all(config_dir)?.ignore;
+
+    ensure_project_registered(
+        path,
+        &mut project_roots,
+        project_roots_path,
+        &rows,
+        is_tty,
+        false, // no --dry-run for decide yet - every call here is for real
+        read_line,
+    )?;
+
+    let boundary = decision_boundary(&rows, &project_roots, path);
+    trace(Verbosity::Debug, || {
+        format!(
+            "{}: resolved boundary -> {}",
+            path.display(),
+            boundary.display()
+        )
+    });
+
+    if add.is_empty() && deny.is_empty() {
+        trace(Verbosity::Debug, || {
+            format!(
+                "{}: no --add/--deny patterns given -> nothing to hand-author upfront",
+                path.display()
+            )
+        });
+    }
+
+    // 1. Hand-authored patterns, verbatim, first - anything the walk
+    // or marker-scan below encounters that matches resolves via
+    // ordinary decision resolution with no separate logic needed.
+    for pattern in add {
+        record_decision(data_dir, &boundary, pattern, pattern, "+")?;
+        println!("recorded: + {pattern} (at {})", boundary.display());
+    }
+    for pattern in deny {
+        record_decision(data_dir, &boundary, pattern, pattern, "-")?;
+        println!("recorded: - {pattern} (at {})", boundary.display());
+    }
+
+    // 2. Walk the filesystem exactly like convert, plus anything
+    // implied by an anchored decision-file pattern the walk couldn't
+    // discover on its own (its target doesn't exist on disk yet, or
+    // it doesn't match any watched name at all) - same source, same
+    // dedup, as `convert`'s own candidate gathering.
+    let mut candidates: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    if path.is_dir() {
+        candidates.extend(find_nested_candidates(
+            path,
+            &boundary,
+            max_depth,
+            &rows,
+            &global_ignore,
+        ));
+    }
+    candidates.extend(decision_file_anchored_candidates(&boundary));
+    let mut candidates: Vec<PathBuf> = candidates.into_iter().collect();
+    candidates.sort_by_key(|p| p.components().count());
+
+    for candidate in &candidates {
+        resolve_candidate(
+            candidate,
+            &boundary,
+            &[],
+            data_dir,
+            is_tty,
+            false,
+            Mode::DECIDE,
+            read_line,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1148,7 +1544,7 @@ mod tests {
         // ask_remember itself always asks; an absent answer (stdin
         // closed mid-prompt) still degrades to Deny, not a hang or panic.
         assert!(matches!(
-            ask_remember(Path::new("/x"), || None),
+            ask_remember(Path::new("/x"), Mode::CONVERT, || None),
             RememberChoice::Deny
         ));
     }
@@ -1754,6 +2150,120 @@ mod tests {
     }
 
     #[test]
+    fn convert_proactively_creates_a_missing_anchored_plus_decision_for_an_unwatched_name() {
+        // The bug this guards against: an anchored `+` decision for a
+        // name that isn't even a watched name (so the walk could never
+        // discover it on its own) must still get created, with no
+        // --create needed - it's the persisted equivalent of one.
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("venv2");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "+ /venv2\n",
+        )
+        .unwrap();
+
+        convert(
+            scratch.path(),
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+        )
+        .unwrap();
+
+        assert!(btrfs::is_subvolume(&target).unwrap());
+    }
+
+    #[test]
+    fn convert_ignores_a_wildcarded_anchored_pattern_for_proactive_creation() {
+        // "/**/venv" has no single concrete location to create from -
+        // must not be treated as an implied candidate at all.
+        let scratch = btrfs_scratch_dir();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "+ /**/venv\n",
+        )
+        .unwrap();
+
+        convert(
+            scratch.path(),
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+        )
+        .unwrap();
+
+        assert!(!scratch.path().join("venv").exists());
+    }
+
+    #[test]
+    fn convert_dry_run_reports_would_create_for_a_missing_anchored_decision() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("venv2");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "+ /venv2\n",
+        )
+        .unwrap();
+
+        convert(
+            scratch.path(),
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            true,
+        )
+        .unwrap();
+
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn decide_surfaces_a_missing_anchored_plus_decision_but_never_materializes_it() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("venv2");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "+ /venv2\n",
+        )
+        .unwrap();
+
+        decide(
+            scratch.path(),
+            &[],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn create_empty_tolerates_a_target_that_already_exists() {
         // Simulates the shim winning a race and creating the subvolume
         // just before convert's own materialize() call took the lock
@@ -1770,7 +2280,38 @@ mod tests {
     }
 
     #[test]
-    fn already_a_subvolume_is_a_silent_no_op() {
+    fn already_a_subvolume_with_an_existing_decision_is_a_silent_no_op() {
+        let scratch = btrfs_scratch_dir();
+        btrfs::create_subvolume(scratch.path(), "already").unwrap();
+        let target = scratch.path().join("already");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "+ already\n",
+        )
+        .unwrap();
+
+        convert(
+            scratch.path(),
+            std::slice::from_ref(&target),
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+        )
+        .unwrap();
+        assert!(btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ already\n"
+        );
+    }
+
+    #[test]
+    fn already_a_subvolume_without_a_tty_leaves_a_pending_marker_untouched_otherwise() {
         let scratch = btrfs_scratch_dir();
         btrfs::create_subvolume(scratch.path(), "already").unwrap();
         let target = scratch.path().join("already");
@@ -1788,7 +2329,182 @@ mod tests {
             false,
         )
         .unwrap();
+
         assert!(btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "? /already\n"
+        );
+    }
+
+    #[test]
+    fn already_a_subvolume_with_a_tty_defaults_to_yes_on_an_empty_answer() {
+        let scratch = btrfs_scratch_dir();
+        btrfs::create_subvolume(scratch.path(), "already").unwrap();
+        let target = scratch.path().join("already");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        let mut answers = vec![String::new()].into_iter();
+        convert_with_io(
+            scratch.path(),
+            std::slice::from_ref(&target),
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+            true,
+            &mut move || answers.next(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ /already\n"
+        );
+    }
+
+    #[test]
+    fn already_a_subvolume_with_a_tty_records_a_decline_explicitly() {
+        let scratch = btrfs_scratch_dir();
+        btrfs::create_subvolume(scratch.path(), "already").unwrap();
+        let target = scratch.path().join("already");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        let mut answers = vec!["n".to_string()].into_iter();
+        convert_with_io(
+            scratch.path(),
+            std::slice::from_ref(&target),
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+            true,
+            &mut move || answers.next(),
+        )
+        .unwrap();
+
+        assert!(btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "- /already\n"
+        );
+    }
+
+    #[test]
+    fn already_a_subvolume_dry_run_reports_instead_of_asking() {
+        let scratch = btrfs_scratch_dir();
+        btrfs::create_subvolume(scratch.path(), "already").unwrap();
+        let target = scratch.path().join("already");
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        convert_with_io(
+            scratch.path(),
+            std::slice::from_ref(&target),
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            true,
+            true,
+            &mut || panic!("dry run must never prompt"),
+        )
+        .unwrap();
+
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn already_a_subvolume_is_a_candidate_even_when_its_name_is_not_watched() {
+        // The walk itself, not just resolve_candidate: an unwatched
+        // name that's already a real subvolume must still be
+        // discovered, not silently skipped for lacking a watched name.
+        let scratch = btrfs_scratch_dir();
+        btrfs::create_subvolume(scratch.path(), "totally-unwatched-name").unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
+
+        let mut answers = vec!["y".to_string()].into_iter();
+        convert_with_io(
+            scratch.path(),
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+            true,
+            &mut move || answers.next(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ /totally-unwatched-name\n"
+        );
+    }
+
+    #[test]
+    fn a_plain_directory_with_an_unwatched_name_is_still_never_a_candidate() {
+        // Confirms the walk change is scoped to *subvolumes*
+        // specifically - an ordinary plain directory with an unwatched
+        // name must not suddenly become a candidate too.
+        let scratch = btrfs_scratch_dir();
+        std::fs::create_dir_all(scratch.path().join("totally-unwatched-plain-dir")).unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
+
+        convert(
+            scratch.path(),
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+        )
+        .unwrap();
+
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn resolve_candidate_skips_an_undecided_existing_subvolume_when_decide_is_disabled() {
+        // Direct unit test of the not-yet-wired-to-any-command
+        // Mode { decide: false, convert: true } combination - see
+        // Mode's own doc comment.
+        let scratch = btrfs_scratch_dir();
+        btrfs::create_subvolume(scratch.path(), "already").unwrap();
+        let target = scratch.path().join("already");
+        let data_dir = empty_cache();
+
+        resolve_candidate(
+            &target,
+            scratch.path(),
+            &[],
+            data_dir.path(),
+            true,
+            false,
+            Mode {
+                decide: false,
+                convert: true,
+            },
+            &mut || panic!("decide disabled - must never ask"),
+        )
+        .unwrap();
+
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
     }
 
     #[test]
@@ -2747,6 +3463,376 @@ mod tests {
 
         assert!(!btrfs::is_subvolume(&target).unwrap());
         assert!(target.is_dir());
+    }
+
+    #[test]
+    fn decide_records_a_plus_and_a_minus_decision_verbatim() {
+        let scratch = btrfs_scratch_dir();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        decide(
+            scratch.path(),
+            &["node_modules".to_string()],
+            &["vendor".to_string()],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ node_modules\n- vendor\n"
+        );
+    }
+
+    #[test]
+    fn decide_uses_patterns_verbatim_no_anchoring_or_broadening() {
+        let scratch = btrfs_scratch_dir();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        decide(
+            scratch.path(),
+            &["/packages/*/**/node_modules".to_string()],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ /packages/*/**/node_modules\n"
+        );
+    }
+
+    #[test]
+    fn decide_toggles_an_existing_pending_marker_with_the_exact_same_pattern_in_place() {
+        let scratch = btrfs_scratch_dir();
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "# a comment\n? node_modules\n# another comment\n",
+        )
+        .unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        decide(
+            scratch.path(),
+            &["node_modules".to_string()],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "# a comment\n+ node_modules\n# another comment\n"
+        );
+    }
+
+    #[test]
+    fn decide_never_creates_a_subvolume_or_touches_anything_besides_the_decision_file() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("real-file.txt"), b"hello").unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        decide(
+            scratch.path(),
+            &["node_modules".to_string()],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert!(!btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read(target.join("real-file.txt")).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn decide_with_no_patterns_at_all_just_registers_the_project() {
+        let scratch = btrfs_scratch_dir();
+        let cache_dir = empty_cache();
+
+        let mut answers = vec![String::new()].into_iter();
+        decide_with_io(
+            scratch.path(),
+            &[],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            true,
+            &mut move || answers.next(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(roots_path(&cache_dir)).unwrap(),
+            format!("{}\n", scratch.path().display())
+        );
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn decide_aborts_without_a_tty_when_the_project_is_not_yet_registered() {
+        let scratch = btrfs_scratch_dir();
+        let cache_dir = empty_cache();
+
+        let err = decide_with_io(
+            scratch.path(),
+            &["node_modules".to_string()],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+            &mut || panic!("must not ask at all without a TTY"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not a registered project"));
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn decide_refuses_a_plain_file_argument() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("not-a-dir");
+        std::fs::write(&target, b"x").unwrap();
+        let cache_dir = empty_cache();
+
+        let err = decide(
+            &target,
+            &["x".to_string()],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn decide_writes_to_a_shallower_already_registered_covering_project_not_the_argument_itself() {
+        // Same-volume nested-project reasoning as
+        // convert_merges_decisions_from_a_shallower_registered_parent_project:
+        // both /a/b (outer) and /a/b/c (inner, the decide argument) are
+        // registered on the same volume - the decision must land in the
+        // outer project's own file, not create a new one at the inner path.
+        let scratch = btrfs_scratch_dir();
+        let outer = scratch.path().join("a/b");
+        let inner = outer.join("c");
+        std::fs::create_dir_all(&inner).unwrap();
+        let cache_dir = empty_cache();
+        std::fs::write(
+            roots_path(&cache_dir),
+            format!("{}\n{}\n", outer.display(), inner.display()),
+        )
+        .unwrap();
+
+        decide(
+            &inner,
+            &["node_modules".to_string()],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outer.join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ node_modules\n"
+        );
+        assert!(!inner.join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn decide_walk_discovers_an_undecided_candidate_and_records_without_materializing() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
+
+        let mut answers = vec!["y".to_string()].into_iter();
+        decide_with_io(
+            scratch.path(),
+            &[],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            true,
+            &mut move || answers.next(),
+        )
+        .unwrap();
+
+        assert!(!btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ /node_modules\n"
+        );
+    }
+
+    #[test]
+    fn decide_walk_leaves_a_pending_marker_without_a_tty() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
+
+        decide(
+            scratch.path(),
+            &[],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert!(!btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "? /node_modules\n"
+        );
+    }
+
+    #[test]
+    fn decide_walk_finding_an_existing_plus_decision_is_a_no_op_not_a_materialize() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("real.txt"), b"content").unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "node_modules")]);
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "+ node_modules\n",
+        )
+        .unwrap();
+
+        decide(
+            scratch.path(),
+            &[],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+        )
+        .unwrap();
+
+        assert!(!btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(std::fs::read(target.join("real.txt")).unwrap(), b"content");
+    }
+
+    #[test]
+    fn decide_resolves_an_orphaned_pending_marker_whose_candidate_does_not_exist_on_disk() {
+        let scratch = btrfs_scratch_dir();
+        // "build" never actually exists on disk - the filesystem walk
+        // could never discover it; only the marker scan can.
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "? /build\n",
+        )
+        .unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        let mut answers = vec!["y".to_string()].into_iter();
+        decide_with_io(
+            scratch.path(),
+            &[],
+            &[],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            true,
+            &mut move || answers.next(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "+ /build\n"
+        );
+        assert!(!scratch.path().join("build").exists());
+    }
+
+    #[test]
+    fn decide_orphaned_marker_matching_a_deny_pattern_resolves_without_asking() {
+        let scratch = btrfs_scratch_dir();
+        std::fs::write(
+            scratch.path().join(filenames::DECISION_FILE_NAME),
+            "? /build\n",
+        )
+        .unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        decide_with_io(
+            scratch.path(),
+            &[],
+            &["/build".to_string()],
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            true,
+            &mut || panic!("must not ask - the --deny pattern already resolves this exact marker"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(filenames::DECISION_FILE_NAME)).unwrap(),
+            "- /build\n"
+        );
     }
 
     #[test]

@@ -142,6 +142,21 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Walk and resolve decisions like convert, but never convert
+    /// anything - and hand-author decisions ahead of time
+    Decide {
+        /// The project: a decision-file/project-roots boundary (same
+        /// registration rules as `convert`)
+        path: String,
+        #[arg(long)]
+        max_depth: Option<u32>,
+        /// Pattern to record as `+` (convert) - used verbatim, repeatable
+        #[arg(long = "add")]
+        add: Vec<String>,
+        /// Pattern to record as `-` (never convert) - used verbatim, repeatable
+        #[arg(long = "deny")]
+        deny: Vec<String>,
+    },
     /// Manage the registered project-roots list
     Projects {
         #[command(subcommand)]
@@ -336,6 +351,28 @@ fn main() -> anyhow::Result<()> {
                 &project_roots_path,
                 &data_dir,
                 dry_run,
+            )
+        }
+        Command::Decide {
+            path,
+            max_depth,
+            add,
+            deny,
+        } => {
+            let config_dir = xdg::config_dir()?;
+            let data_dir = xdg::data_dir()?;
+            let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
+            let project_roots_path = data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME);
+            let project_path = absolutize(&path)?;
+            convert::decide(
+                &project_path,
+                &add,
+                &deny,
+                max_depth,
+                &config_dir,
+                &cache_path,
+                &project_roots_path,
+                &data_dir,
             )
         }
         Command::Projects { action } => {

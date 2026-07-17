@@ -163,8 +163,53 @@ None — went green on the first full test run after the mechanical
 signature-threading updates.
 
 ## Phase 4 — decide subcommand
-**Status**: not started
-**Date**:
+**Status**: done
+**Date**: 2026-07-16
 ### What was done
+- `src/main.rs`: new `Command::Decide { path: String, add: Vec<String>,
+  deny: Vec<String> }` (`--add`/`--deny`, both repeatable).
+- `src/convert.rs`: `pub fn decide`/`fn decide_with_io` (same file as
+  `convert`, not a separate module — avoids any visibility changes to
+  the half-dozen private helpers it reuses). Reuses
+  `ensure_project_registered` (upfront registration, same four-branch
+  decision tree as `convert`) and `decision_boundary` (so a decision
+  lands in the same, possibly-shallower, already-registered covering
+  project's file that `convert`/`intercept` would later consult —
+  consistent with the "no nested projects" model). For each `--add`/
+  `--deny` pattern, calls `record_decision` with the pattern used
+  verbatim as *both* the search key and the content — an exact-string
+  coincidence (not a re-derivation) that still correctly toggles a
+  pending `?` marker in place if a human happens to type the same
+  pattern a prior undecided candidate left behind. Reports each
+  recorded decision (`recorded: + <pattern> (at <boundary>)`),
+  matching `convert`'s "report every mutation" convention. No
+  `config_dir`/`merge`/ignore-pattern plumbing needed at all — `decide`
+  never walks, so ignore patterns are irrelevant to it.
+- `README.md`: documented the subcommand in both the commands table and
+  "How it works".
 ### Deviations from plan
+None structurally. No `--dry-run` flag added to `decide` (the plan
+didn't call for it, and it wasn't implemented to avoid speculative
+scope) — would be a cheap, natural follow-up given
+`ensure_project_registered` already has a `dry_run` parameter to plumb
+through, if ever wanted.
 ### Issues found / fixed
+None — green on the first full test run after implementation. Live
+smoke test (`decide <path> --add node_modules --add /dist --deny
+vendor`) confirmed the exact expected file content and reporting
+output.
+
+### Follow-up: more debug tracing for silent branches
+User reported `GHOSTVOLUMES_DEBUG=debug decide <path>` (no
+`--add`/`--deny`) printed nothing at all, on an already-registered
+project — `ensure_project_registered`'s "already covered" branch (and
+its dry-run/nesting-conflict/orphan-ancestor/plain-ask branches) had no
+`trace` calls at all, unlike `resolve_candidate`'s per-branch tracing;
+`decide_with_io` had none either. Added a `Verbosity::Debug` trace to
+every branch of `ensure_project_registered` (already-covered names
+which registered project covers it; each of the other four states its
+own reasoning) and to `decide_with_io` (resolved boundary; an explicit
+"no patterns given, nothing to record" trace for exactly the reported
+scenario). No behavior change - `cargo test` stayed at 261 passed.
+Verified live: the exact reported command now prints three debug lines
+explaining the no-op.

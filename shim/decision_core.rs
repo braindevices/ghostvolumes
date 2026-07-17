@@ -287,6 +287,40 @@ pub fn needs_pending_marker(text: &str, pattern: &str) -> bool {
     !text.lines().any(|existing| existing.trim() == line)
 }
 
+/// Every `? <pattern>` pending-marker line's own pattern, in file
+/// order - used by `decide` (CLI-only) to resolve markers whose
+/// candidate might not exist on disk at all, independent of any
+/// filesystem walk (a walk can only ever discover a directory that's
+/// actually there). Dead code from the shim's own perspective - the
+/// shim only ever *appends* a pending marker, it never resolves one.
+///
+/// Every anchored, wildcard-free `+` or `?` line's own pattern — a
+/// single, concrete location (`/name`, not `/a/**/name`'s arbitrary
+/// depth or a bare unanchored `name`'s any-depth-by-leaf) — used to
+/// surface a candidate a filesystem walk could never discover on its
+/// own: its target doesn't exist on disk yet (a `+`, or a still-`?`-
+/// pending marker), or it doesn't match any watched name at all (an
+/// anchored `+` decision is the *persisted* equivalent of `--create` —
+/// recording it once should keep being honored on every future run,
+/// not just the one where `--create` was passed). `-` lines are
+/// excluded deliberately: a missing candidate that's already denied
+/// would just be skipped anyway, so surfacing it buys nothing.
+/// Wildcarded/unanchored patterns are excluded too — there's no single
+/// concrete path to reconstruct from a rule that matches many.
+#[allow(dead_code)]
+pub fn parse_anchored_exact_patterns(text: &str) -> std::vec::Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed
+                .strip_prefix('+')
+                .or_else(|| trimmed.strip_prefix('?'))?;
+            let pattern = rest.trim_start();
+            (pattern.starts_with('/') && !pattern.contains("**")).then(|| pattern.to_string())
+        })
+        .collect()
+}
+
 /// Replaces an existing `? <pattern>` pending-marker line in place with
 /// `decision_line` (e.g. `+ <pattern>` or `- <pattern>`), preserving
 /// every other line's content and order unchanged. Only `pattern`
@@ -578,6 +612,26 @@ mod tests {
     #[test]
     fn needs_pending_marker_true_for_empty_file() {
         assert!(needs_pending_marker("", "/node_modules"));
+    }
+
+    #[test]
+    fn parse_anchored_exact_patterns_extracts_plus_and_pending_in_order() {
+        let text = "+ dist\n? /packages/foo/node_modules\n# a comment\n+ /venv2\n- /cache\n";
+        assert_eq!(
+            parse_anchored_exact_patterns(text),
+            vec!["/packages/foo/node_modules".to_string(), "/venv2".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_anchored_exact_patterns_excludes_unanchored_and_wildcarded_and_denied() {
+        let text = "+ dist\n+ /**/venv\n? node_modules\n- /venv2\n";
+        assert!(parse_anchored_exact_patterns(text).is_empty());
+    }
+
+    #[test]
+    fn parse_anchored_exact_patterns_empty_for_empty_text() {
+        assert!(parse_anchored_exact_patterns("").is_empty());
     }
 
     #[test]
