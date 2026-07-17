@@ -14,6 +14,8 @@ mod btrfs;
 #[cfg(target_os = "linux")]
 mod cache;
 #[cfg(target_os = "linux")]
+mod completions;
+#[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]
 mod convert;
@@ -44,6 +46,8 @@ mod projects;
 #[cfg(target_os = "linux")]
 mod reload;
 #[cfg(target_os = "linux")]
+mod roots;
+#[cfg(target_os = "linux")]
 mod scan;
 #[cfg(target_os = "linux")]
 mod shellinit;
@@ -56,7 +60,9 @@ mod xdg;
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+#[cfg(target_os = "linux")]
+use clap_complete::engine::ArgValueCompleter;
 
 /// `git describe` (via `build.rs`) pins down exactly which commit was
 /// built, since `CARGO_PKG_VERSION` alone can't. `GHOSTVOLUMES_VERSION`
@@ -98,6 +104,10 @@ enum Command {
     Init,
     /// Survey for undecided directories and suggest `decide` commands to run
     Discover {
+        /// An arbitrary directory to survey, not necessarily a
+        /// registered project - plain filesystem completion, not the
+        /// registered-projects list `convert`/`decide` use
+        #[arg(value_hint = clap::ValueHint::DirPath)]
         path: Option<String>,
         /// How many directory levels deep to scan (bounded by default,
         /// unlike convert/decide, since `path` is an arbitrary,
@@ -122,6 +132,7 @@ enum Command {
     Convert {
         /// The project: a decision-file/project-roots boundary, never
         /// itself converted
+        #[arg(add = ArgValueCompleter::new(completions::registered_projects))]
         path: String,
         #[arg(long)]
         max_depth: Option<u32>,
@@ -140,14 +151,15 @@ enum Command {
     Decide {
         /// The project: a decision-file/project-roots boundary (same
         /// registration rules as `convert`)
+        #[arg(add = ArgValueCompleter::new(completions::registered_projects))]
         path: String,
         #[arg(long)]
         max_depth: Option<u32>,
         /// Pattern to record as `+` (convert) - used verbatim, repeatable
-        #[arg(long = "add")]
+        #[arg(long = "add", add = ArgValueCompleter::new(completions::pending_patterns))]
         add: Vec<String>,
         /// Pattern to record as `-` (never convert) - used verbatim, repeatable
-        #[arg(long = "deny")]
+        #[arg(long = "deny", add = ArgValueCompleter::new(completions::pending_patterns))]
         deny: Vec<String>,
     },
     /// Manage the registered project-roots list
@@ -174,6 +186,17 @@ enum RootsAction {
     },
     /// List every root.d-configured root and its effective watch list
     List,
+    /// Disable a configured root - writes roots.d/10-disable.toml, never
+    /// touching 00-auto.toml or any hand-edited file
+    Disable {
+        #[arg(add = ArgValueCompleter::new(completions::enabled_roots))]
+        path: String,
+    },
+    /// Re-enable a root previously disabled via `roots disable`
+    Enable {
+        #[arg(add = ArgValueCompleter::new(completions::disabled_roots))]
+        path: String,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -185,7 +208,10 @@ enum ProjectsAction {
     Register { path: String },
     /// Remove a project root. With no path: scan every entry and interactively
     /// offer to prune ones that no longer exist on disk
-    Unregister { path: Option<String> },
+    Unregister {
+        #[arg(add = ArgValueCompleter::new(completions::registered_projects))]
+        path: Option<String>,
+    },
 }
 
 /// Resolves a raw CLI path argument to an absolute path before use —
@@ -223,6 +249,8 @@ mod absolutize_tests {
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     preload_guard::refuse_if_shim_preloaded(
         std::env::var("LD_PRELOAD").ok().as_deref(),
@@ -251,6 +279,18 @@ fn main() -> anyhow::Result<()> {
                     println!("{}\t{}", root.path, root.watches.join(", "));
                 }
                 Ok(())
+            }
+            RootsAction::Disable { path } => {
+                let config_dir = xdg::config_dir()?;
+                roots::disable(&config_dir, &absolutize(&path)?.to_string_lossy())?;
+                let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
+                reload::reload(&config_dir, &cache_path)
+            }
+            RootsAction::Enable { path } => {
+                let config_dir = xdg::config_dir()?;
+                roots::enable(&config_dir, &absolutize(&path)?.to_string_lossy())?;
+                let cache_path = xdg::data_dir()?.join(filenames::COMPILED_CACHE_FILE_NAME);
+                reload::reload(&config_dir, &cache_path)
             }
         },
         Command::Reload => {

@@ -7,9 +7,11 @@ Every path GhostVolumes reads or writes, in one place.
 ```
 ~/.config/ghostvolumes/
 ├── roots.d/
-│   ├── 00-auto.toml      # written by `roots scan --save` — regenerated every run, never hand-edit
-│   ├── 00-defaults.toml  # written once by `init` if missing, never overwritten after — see below
-│   └── 10-local.toml     # yours: any *.toml file works, this is just the documented convention name
+│   ├── 00-auto.toml         # written by `roots scan --save` — regenerated every run, never hand-edit
+│   ├── 00-defaults.toml     # written once by `init` if missing, never overwritten after — see below
+│   ├── 10-disable.toml      # written by `roots disable`/`enable` — only ever lists disabled roots
+│   ├── roots-disable.lock   # guards that read-modify-write, never deleted (same as the locks below)
+│   └── 10-local.toml        # yours: any *.toml file works, this is just the documented convention name
 ```
 
 Every `*.toml` directly under `roots.d/` is merged, sorted by

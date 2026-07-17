@@ -14,6 +14,7 @@ Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, .
 
 - [Features](#features)
 - [Install](#install)
+- [Shell completions](#shell-completions)
 - [How it works](#how-it-works)
 - [Commands](#commands)
 - [Configuration](#configuration)
@@ -42,6 +43,16 @@ ghostvolumes roots scan --save   # detect your snapshot-managed BTRFS roots
 
 That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](documents/FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](documents/FAQ.md) for the recommended workflow.
 
+## Shell completions
+
+Dynamic — subcommands/flags plus live data (registered projects, pending `?` patterns for `decide --add`/`--deny`), not a static snapshot:
+
+```bash
+echo 'source <(COMPLETE=bash ghostvolumes)' >> ~/.bashrc   # or ~/.zshrc with COMPLETE=zsh
+```
+
+Re-sourced fresh on every shell startup rather than saved to a file, matching `clap_complete`'s own recommendation — the shell/binary handshake is unstable across versions.
+
 ## How it works
 
 A directory gets a `+`/`-` decision recorded once; every future build reuses it automatically, no prompt, no guessing:
@@ -65,6 +76,8 @@ Shared reference: [decision-files.md](documents/decision-files.md) (the `.ghostv
 |---|---|
 | `ghostvolumes roots scan [--save]` | Detect BTRFS snapshot-managed roots |
 | `ghostvolumes roots list` | List every configured root and its effective watch list |
+| `ghostvolumes roots disable <path>` | Disable a configured root — writes `roots.d/10-disable.toml`, never touches `00-auto.toml` |
+| `ghostvolumes roots enable <path>` | Re-enable a root previously disabled via `roots disable` |
 | `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d` |
 | `ghostvolumes discover [PATH] [flags]` | Survey for undecided directories and drift, suggesting `decide`/`convert` commands to run — see [discover.md](documents/discover.md) |
 | `ghostvolumes convert <path> [--max-depth N] [--create <relative-path>]... [--dry-run]` | Register `<path>` as a project (asks if not already), then recursively resolve subvolume candidates under it — see [convert.md](documents/convert.md) |

@@ -24,6 +24,15 @@ pub const AUTO_ROOTS_FILE_NAME: &str = "00-auto.toml";
 /// `init`'s default-watches/default-ignore skeleton, within `ROOTS_D_DIR`.
 pub const DEFAULT_WATCHES_FILE_NAME: &str = "00-defaults.toml";
 
+/// `roots enable`/`disable`'s own file, within `ROOTS_D_DIR` — only ever
+/// lists roots explicitly disabled via the CLI, never touched by
+/// `scan --save` or any hand-edited file.
+pub const DISABLED_ROOTS_FILE_NAME: &str = "10-disable.toml";
+
+/// Guards `roots enable`/`disable`'s read-modify-write sequence on
+/// `DISABLED_ROOTS_FILE_NAME`, within `ROOTS_D_DIR`.
+pub const DISABLED_ROOTS_LOCK_FILE_NAME: &str = "roots-disable.lock";
+
 /// The ignore-pattern file name: same gitignore-style grammar as
 /// `DECISION_FILE_NAME` but no `+`/`-`/`?` prefix, and exists only at
 /// one boundary location, never walked up through. CLI-only.
