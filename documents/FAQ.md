@@ -24,7 +24,7 @@ rm -rf node_modules && ghostvolumes intercept -- npm install
 
 **Cloning a repo that already has decisions committed:** nothing to do — `ghostvolumes intercept -- <your build command>` works from the very first build.
 
-**Pre-authoring decisions before ever building:** hand-write `.ghostvolumes-decisions` yourself (see [how-it-works.md](how-it-works.md#decision-files) for the pattern syntax) — `intercept` benefits immediately, same as the cloned-repo case.
+**Pre-authoring decisions before ever building:** hand-write `.ghostvolumes-decisions` yourself (see [decision-files.md](decision-files.md) for the pattern syntax) — `intercept` benefits immediately, same as the cloned-repo case.
 
 ## What happens if `intercept` finds something undecided?
 

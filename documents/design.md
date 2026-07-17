@@ -10,6 +10,18 @@ want to read either whole doc first. When these disagree,
 decision-model.plan.md wins for anything it covers, main-plan.md
 otherwise — update this file to match.
 
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**
+
+- [What it does](#what-it-does)
+- [Non-goals (explicit, not just unfinished)](#non-goals-explicit-not-just-unfinished)
+- [Key decisions and why](#key-decisions-and-why)
+- [Known compromises / accepted gaps](#known-compromises--accepted-gaps)
+- [Gotchas for contributors](#gotchas-for-contributors)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 ## What it does
 
 Auto-converts volatile, high-churn directories (`node_modules`,

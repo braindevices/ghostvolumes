@@ -8,6 +8,22 @@ Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, .
 
 **Requires Linux with BTRFS.** GhostVolumes exits cleanly with a clear message on any other platform.
 
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**
+
+- [Features](#features)
+- [Install](#install)
+- [How it works](#how-it-works)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [Debugging](#debugging)
+- [Upgrading](#upgrading)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 ## Features
 
 - **Zero sudo at runtime** — subvolume creation only needs standard filesystem permissions.
@@ -24,19 +40,24 @@ ghostvolumes init                # compile + install the LD_PRELOAD shim, write 
 ghostvolumes roots scan --save   # detect your snapshot-managed BTRFS roots
 ```
 
-That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](FAQ.md) for the recommended workflow.
+That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](documents/FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](documents/FAQ.md) for the recommended workflow.
 
 ## How it works
 
-A directory gets a `+`/`-` decision recorded once; every future build
-reuses it automatically, no prompt, no guessing:
+A directory gets a `+`/`-` decision recorded once; every future build reuses it automatically, no prompt, no guessing:
 
-- **`ghostvolumes intercept -- <cmd>`** — runs `<cmd>` with the shim active, converting anything already decided `+`. Never prompts.
-- **`ghostvolumes convert <path>`** — registers `<path>` as a project, then walks it asking about each undecided candidate, converting and recording a decision as it goes.
-- **`ghostvolumes decide <path>`** — the same walk as `convert`, but only ever records decisions, never touches the filesystem.
-- **`ghostvolumes discover [path]`** — a read-only survey of an arbitrary path, suggesting `decide`/`convert` commands to run rather than acting itself.
+```
+$ npm install                              # node_modules created as a plain directory
+$ ghostvolumes convert .                   # asks once, records a decision
+$ ghostvolumes intercept -- npm install    # from now on: automatic, no prompt
+```
 
-See **[how-it-works.md](how-it-works.md)** for the full guide (decision file syntax, ignore tiers, the project-roots/no-nesting rules) and **[discover.md](discover.md)** for `discover` specifically. [design.md](design.md) has the full rationale, and [FAQ.md](FAQ.md) has common workflow questions.
+- **[`intercept -- <cmd>`](documents/intercept.md)** — runs `<cmd>` with the shim active, converting anything already decided `+`. Never prompts.
+- **[`convert <path>`](documents/convert.md)** — registers `<path>` as a project, then walks it asking about each undecided candidate.
+- **[`decide <path>`](documents/decide.md)** — the same walk as `convert`, but only ever records decisions, never touches the filesystem.
+- **[`discover [path]`](documents/discover.md)** — a read-only survey of an arbitrary path, suggesting `decide`/`convert` commands to run rather than acting itself.
+
+Shared reference: [decision-files.md](documents/decision-files.md) (the `.ghostvolumes-decisions` syntax), [project-roots.md](documents/project-roots.md) (why projects can't nest), and [files.md](documents/files.md) (every file GhostVolumes reads or writes, annotated). [design.md](documents/design.md) has the full rationale, and [FAQ.md](documents/FAQ.md) has common workflow questions.
 
 ## Commands
 
@@ -45,23 +66,23 @@ See **[how-it-works.md](how-it-works.md)** for the full guide (decision file syn
 | `ghostvolumes roots scan [--save]` | Detect BTRFS snapshot-managed roots |
 | `ghostvolumes roots list` | List every configured root and its effective watch list |
 | `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d` |
-| `ghostvolumes discover [PATH] [flags]` | Survey for undecided directories and drift, suggesting `decide`/`convert` commands to run — see [discover.md](discover.md) |
-| `ghostvolumes convert <path> [--max-depth N] [--create <relative-path>]... [--dry-run]` | Register `<path>` as a project (asks if not already), then recursively resolve subvolume candidates under it |
-| `ghostvolumes decide <path> [--max-depth N] [--add <pattern>]... [--deny <pattern>]...` | Walk and resolve decisions like `convert`, but never convert anything; also hand-authors `+`/`-` decisions directly |
+| `ghostvolumes discover [PATH] [flags]` | Survey for undecided directories and drift, suggesting `decide`/`convert` commands to run — see [discover.md](documents/discover.md) |
+| `ghostvolumes convert <path> [--max-depth N] [--create <relative-path>]... [--dry-run]` | Register `<path>` as a project (asks if not already), then recursively resolve subvolume candidates under it — see [convert.md](documents/convert.md) |
+| `ghostvolumes decide <path> [--max-depth N] [--add <pattern>]... [--deny <pattern>]...` | Walk and resolve decisions like `convert`, but never convert anything; also hand-authors `+`/`-` decisions directly — see [decide.md](documents/decide.md) |
 | `ghostvolumes projects list` | List registered project roots, flagging any that no longer exist |
-| `ghostvolumes projects register <path>` | Register a project root (usually automatic via `convert`) |
+| `ghostvolumes projects register <path>` | Register a project root (usually automatic via `convert`) — see [project-roots.md](documents/project-roots.md) |
 | `ghostvolumes projects unregister [path]` | Remove a project root; with no path, scan and interactively prune stale ones |
-| `ghostvolumes intercept -- <cmd>` | Run `<cmd>` with the shim active, converting anything with a recorded `+` decision |
+| `ghostvolumes intercept -- <cmd>` | Run `<cmd>` with the shim active, converting anything with a recorded `+` decision — see [intercept.md](documents/intercept.md) |
 | `ghostvolumes init` | Install the shim and default config (idempotent, safe to re-run) |
 | `ghostvolumes shell-init <bash\|zsh>` | Print the `LD_PRELOAD` value `intercept` uses (diagnostic only) |
 
 ## Configuration
 
-Global config lives under `~/.config/ghostvolumes/roots.d/`:
+Global config lives under `~/.config/ghostvolumes/roots.d/` — see [files.md](documents/files.md) for every file GhostVolumes reads or writes, config and data alike:
 
 ```
 roots.d/00-auto.toml     # written by `roots scan --save` — regenerated, don't hand-edit
-roots.d/00-defaults.toml # ships with the package: default-watches = node_modules, target, .venv, .cache, build
+roots.d/00-defaults.toml # ships with the package — written once by `init` if missing
 roots.d/10-local.toml    # hand-edited: extra roots, per-root overrides, disabling a root
 ```
 
@@ -88,10 +109,7 @@ path — each root path is its own independent entry.
 per-root `["/path"] ignore = [...]` override. Per-root/per-project
 ignore patterns instead live in their own `.ghostvolumes-ignore` file,
 decentralized rather than merged through `roots.d` — see
-[how-it-works.md](how-it-works.md#ignoring-directories-entirely).
-
-Decision file syntax and the project-roots/no-nesting rules also live
-in [how-it-works.md](how-it-works.md) rather than here.
+[convert.md](documents/convert.md#ignoring-directories-entirely).
 
 ## Debugging
 
@@ -128,7 +146,7 @@ ghostvolumes init   # re-installs the shim to match the new build
 - **A brand-new project with no decisions recorded** gets no benefit from `intercept` on its first build. Run `ghostvolumes convert <project-root>` once to seed decisions.
 - **No prebuilt binaries** — the shim must compile against the host's own libc, so installs always build from source.
 
-See [design.md](design.md) for the reasoning behind these tradeoffs, and [FAQ.md](FAQ.md) for common workflow questions.
+See [design.md](documents/design.md) for the reasoning behind these tradeoffs, and [FAQ.md](documents/FAQ.md) for common workflow questions.
 
 ## License
 

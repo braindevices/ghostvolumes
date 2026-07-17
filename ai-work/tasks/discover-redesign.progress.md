@@ -361,3 +361,140 @@ Not in the original plan — a follow-up documentation request.
 ### Issues found / fixed
 None — docs-only change. README word count: 1955 → 1010 (across two
 condensing passes, original was 2247).
+
+## Step 11 — example-first docs, split how-it-works.md per subcommand
+**Status**: done
+**Date**: 2026-07-16
+### What was done
+Follow-up requests: (1) every guide should show a real example command
++ output right after its opening summary, before any reference detail;
+(2) `how-it-works.md` (Step 10) should split per subcommand, the same
+way `discover.md` stands alone; (3) `discover.md`'s "Nested suggestions
+get merged" section should let a before/after example pair speak
+instead of prose — the user demonstrated this directly with their own
+edit to `discover.md` (added a top-level `## Example` right after the
+summary, and replaced the prose explanation with two before/after
+command+output blocks for `--no-project`/`--root-is-project`).
+Deleted `how-it-works.md`, replaced with five focused guides, each
+following the demonstrated example-first shape (summary → usage line →
+`## Example` with real command+output → concise notes below):
+`intercept.md`, `convert.md` (also absorbed "Ignoring directories
+entirely" as its own section, since only `convert`'s walk is affected
+by all three ignore tiers), `decide.md`, `decision-files.md` (shared
+syntax reference), `project-roots.md` (shared "projects can't nest"
+reference). README's "How it works" section gained its own `npm
+install` → `convert` → `intercept` example block, and its bullets now
+link straight to each guide instead of describing them inline.
+Fixed the one link in `discover.md` that referenced the now-deleted
+`how-it-works.md#projects-cant-nest` anchor (retargeted to
+`project-roots.md`, without a fragment since that anchor doesn't exist
+there — `project-roots.md`'s whole content is the nesting rule, no
+sub-heading needed) — left the rest of the user's own `discover.md`
+edit untouched, including the "So it merge them." phrasing, since it
+was a deliberate demonstration of the desired terser style, not a
+draft to be cleaned up.
+### Deviations from plan
+Not in the original plan — follow-up documentation requests, the last
+one demonstrated by the user's own direct edit rather than described.
+### Issues found / fixed
+Caught before committing: a link I first wrote as
+`project-roots.md#projects-cant-nest` would have 404'd, since
+`project-roots.md`'s nesting rule is prose under the `# Project roots`
+title, not its own `## Projects can't nest` heading — fixed by
+dropping the fragment. Verified via repo-wide grep that no `how-it-
+works` reference survived and every remaining cross-doc link
+(`\](*.md...)`) resolves to a file that exists.
+
+## Step 12 — files.md: every on-disk path, annotated
+**Status**: done
+**Date**: 2026-07-16
+### What was done
+Follow-up request: document every special file/directory GhostVolumes
+reads or writes, prompted by the user pasting real `tree` output from
+`~/.config/ghostvolumes/` and `~/.local/share/ghostvolumes/` and
+asking for it explained inline in the tree, plus a request to add the
+`.ghostvolumes-ignore` example/location too.
+Dispatched a research agent first rather than writing from memory —
+several things needed verifying against source, not assumed: whether
+`watched.d/` (present on the real machine's tree) is still read at
+runtime, why the real machine had `00-manual.toml` instead of the
+documented `10-local.toml`, whether lock files are meant to persist
+after use, and what distinguishes `locks/<boundary>.lock` from
+`locks/decisions/<boundary>.lock`. Findings: `watched.d` is fully dead
+— folded into `roots.d` per commits `edb97a8`/`c850877`/`4322b1b`, no
+current code path reads it at all, safe to delete; `roots.d`'s loader
+is filename-agnostic (any `*.toml`, sorted, last-file-wins-per-field),
+so `00-manual.toml` works but isn't something any command scaffolds —
+`10-local.toml` is convention, not enforced; lock files are advisory
+`flock`s on marker files that are never `remove_file`'d, so persisting
+indefinitely is expected, not a stuck lock; `locks/` guards the
+subvolume create/copy/rename filesystem operation, `locks/decisions/`
+guards the separate read-modify-write of a project's own decision
+file — two hierarchies so neither blocks the other unnecessarily.
+Also caught, while researching: README's `00-defaults.toml` line was
+stale (`node_modules, target, .venv, .cache, build`), missing
+`.uv-cache`/`.ruff_cache`/`.pytest_cache` and the whole `default-ignore`
+list present in the real shipped `src/init.rs` constant — fixed to
+point at `files.md`'s accurate copy instead of repeating a
+now-inaccurate inline summary.
+New `files.md`: annotated trees for both XDG directories (using the
+user's own real paths, comments per line rather than prose paragraphs,
+matching the example-first/terse style established in Step 11) plus a
+third tree for per-project files (`.ghostvolumes-decisions`,
+`.ghostvolumes-ignore`) with the ignore-file's own example content
+block, linking to `convert.md#ignoring-directories-entirely` for the
+full three-tier explanation rather than duplicating it.
+### Deviations from plan
+Not in the original plan — follow-up documentation request.
+### Issues found / fixed
+None in the new doc itself. Fixed the one stale fact found in README
+(default-watches list) as a side effect of verifying files.md's own
+claims against the same source.
+
+## Step 13 — automated table of contents for README.md/design.md
+**Status**: done
+**Date**: 2026-07-17
+### What was done
+Added `scripts/update-toc.sh`, a re-runnable script that regenerates
+the table of contents in `README.md` and `documents/design.md` in
+place via `doctoc` (https://github.com/thlorenz/doctoc) — the
+`<!-- START doctoc -->`/`<!-- END doctoc -->` markers it manages let
+every future run update in place rather than duplicating, verified
+idempotent (second run reported "Everything is OK." with zero diff).
+Tool selection went through a few rounds before landing here:
+- First considered Rust-native options (`mktoc`, 23 GitHub stars,
+  in-place marker editing) vs. a Go option (`gh-md-toc`, 524 stars,
+  more popular but stdout-only, no in-place editing) — the user's
+  initial ask was to prefer Rust/Go over npm.
+- User then reconsidered based on `doctoc`'s much larger real-world
+  adoption (thousands of dependent projects incl. NASA/openmct,
+  Prisma, webpack, docusaurus) and asked to use it via `fnm` (Fast
+  Node Manager) instead, rather than requiring a system-wide Node
+  install.
+- `fnm` itself turned out to be a Rust tool (`cargo install fnm`),
+  which the user asked for over the curl-script installer once a
+  first live run surfaced it — cleaner provenance (goes through
+  `cargo`, not a downloaded shell script) and one less special case
+  in the script (no manual `--install-dir`/PATH bookkeeping needed,
+  `cargo install` already puts it on `~/.cargo/bin`, already on PATH).
+The script: checks for `fnm` on PATH, `cargo install`s it if missing,
+`fnm install --lts` + `fnm use lts-latest`, then `npx --yes doctoc`
+(avoids a persistent global npm install) against both files with
+`--minlevel 2 --toc-location before --github` — placing the TOC after
+the title/intro paragraph and before the first real section, with
+GitHub-compatible anchor links.
+### Deviations from plan
+Not in the original plan — a new feature request, mid-course-corrected
+twice by the user based on tool-selection tradeoffs surfaced live
+(first a stars/maturity comparison, then a live `fnm use --lts`
+syntax error that revealed the correct install path).
+### Issues found / fixed
+`fnm use --lts` is not valid syntax (that flag only exists on `fnm
+install`) — caught by actually running the script rather than
+assuming; fixed to `fnm use lts-latest` after confirming via `fnm use
+--help`/`fnm list` that `lts-latest` is the alias `fnm install --lts`
+registers. Cleaned up the earlier curl-script-installed `fnm` (binary
++ its `~/.local/share/fnm` data dir) before switching to the
+`cargo install` version, and confirmed via `which -a fnm` and a grep
+of shell rc files that nothing stale or shell-rc-modifying survived
+the switch.

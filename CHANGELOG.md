@@ -13,7 +13,7 @@ Notable changes to this project, loosely following [Keep a Changelog](https://ke
 
 ## 0.3.0 — 2026-07-13
 
-Cross-process atomic file I/O, plus a proper project-roots lifecycle. See [design.md](design.md) for the full rationale.
+Cross-process atomic file I/O, plus a proper project-roots lifecycle. See [design.md](documents/design.md) for the full rationale.
 
 - **Changed** `atomic_write.rs`'s temp filenames to include the writing process's PID and a per-process counter, closing a corruption window where two concurrent writers to the same destination shared one temp path.
 - **Changed** every append-based writer (`register`'s append, `convert`'s decision-file append, `discover --save`, the shim's log line) from multi-piece `writeln!` to a single `write_all()` call per line, so a concurrent appender can never land mid-line.
@@ -24,7 +24,7 @@ Cross-process atomic file I/O, plus a proper project-roots lifecycle. See [desig
 
 ## 0.2.0 — 2026-07-13
 
-Decision-model rewrite: replaces the git-tracked gate and shell `cd`-hook with an explicit, gitignore-style decision-file model. See [design.md](design.md) for the full rationale.
+Decision-model rewrite: replaces the git-tracked gate and shell `cd`-hook with an explicit, gitignore-style decision-file model. See [design.md](documents/design.md) for the full rationale.
 
 - **Removed** the git-tracked gate (`is_git_tracked`, shelling out to `git ls-files`) and all VCS-based detection.
 - **Removed** the proactive `cd`-hook / shell-integration activation path (`ghostvolumes ensure`, `shell-init`'s hook mode). `ghostvolumes intercept -- <cmd>` is now the sole activation path; `shell-init` prints a diagnostic value only.
