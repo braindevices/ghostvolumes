@@ -172,17 +172,17 @@ jobs:
             -f btrfs /mnt/ghostvolumes-snapper-test
           # Confirm snapper actually did what §3 relies on, with a clear,
           # attributable failure here rather than a confusing one two steps
-          # later in `ghostvolumes scan` if some snapper version/flag
+          # later in `ghostvolumes roots scan` if some snapper version/flag
           # combination behaves differently than expected.
           test -d /mnt/ghostvolumes-snapper-test/.snapshots
           [ "$(stat -c '%i' /mnt/ghostvolumes-snapper-test/.snapshots)" = "256" ]
       - name: Build
         run: cargo build
-      - name: ghostvolumes scan detects the real snapper-managed mountpoint
+      - name: ghostvolumes roots scan detects the real snapper-managed mountpoint
         run: |
-          ./target/debug/ghostvolumes scan | tee scan-output.txt
+          ./target/debug/ghostvolumes roots scan | tee scan-output.txt
           grep -qx "/mnt/ghostvolumes-snapper-test" scan-output.txt
-      - name: ghostvolumes scan --save + reload round-trip
+      - name: ghostvolumes roots scan --save + reload round-trip
         run: |
           export XDG_CONFIG_HOME=$RUNNER_TEMP/config
           export XDG_DATA_HOME=$RUNNER_TEMP/data
@@ -194,7 +194,7 @@ jobs:
           # compiled.tsv ends up existing but empty - which the old silent
           # `grep -q`/`test -s` checks below failed on with zero explanation.
           ./target/debug/ghostvolumes init
-          ./target/debug/ghostvolumes scan --save
+          ./target/debug/ghostvolumes roots scan --save
 
           roots_file="$XDG_CONFIG_HOME/ghostvolumes/roots.d/00-auto.toml"
           if [ ! -f "$roots_file" ]; then
