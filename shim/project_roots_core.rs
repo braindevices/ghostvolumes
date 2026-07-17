@@ -1,27 +1,13 @@
-// Project-roots list (ai-work/tasks/decision-model.plan.md §3): a
-// plain-text file, one path per line, giving the decision-file
-// walk-up a narrower stopping boundary than the broader `roots.d`
-// entries alone. Deliberately not TOML/compiled: a registered
-// project-root path needs no BTRFS validation (unlike `roots.d`), so
-// there's no reason to route it through `reload`'s compile step - read
-// live, same philosophy as decision files themselves (§3, §5).
-//
-// Dependency-free (plain `std` only), shared between the main CLI (via
-// `include!`, from `src/project_roots.rs`) and the LD_PRELOAD shim (via
-// `mod`, from `shim/preload.rs`).
-//
-// Plain `//` comments, not `//!`/`///`: this file gets spliced
-// mid-file into src/project_roots.rs via `include!`.
+// Project-roots list (§3): a plain-text file, one path per line, giving
+// the decision-file walk-up a narrower stopping boundary than the
+// broader `roots.d` entries alone. Deliberately not TOML/compiled:
+// read live, same philosophy as decision files (§3, §5). Dependency-free,
+// shared via `include!` (CLI) / `mod` (shim).
 
 /// Strips a single trailing `/` from `path` — except when `path` is
-/// exactly `"/"`, which must keep it — so the same physical directory
-/// always compares and displays identically regardless of whether it
-/// was registered with or without a trailing slash. Shell
-/// tab-completion routinely appends one for a directory argument
-/// (`projects register`'s `path: String` is a raw, unvalidated CLI
-/// arg); `convert`'s own `Path::display()`-derived boundaries never do
-/// — the exact mismatch that left `projects list` showing some entries
-/// with a trailing slash and some without.
+/// exactly `"/"`, which must keep it — so the same directory compares
+/// and displays identically regardless of a trailing slash (shell
+/// tab-completion often appends one; `convert`'s boundaries never do).
 #[allow(dead_code)]
 pub fn normalize_root_path(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
@@ -33,11 +19,9 @@ pub fn normalize_root_path(path: &str) -> String {
 }
 
 /// Parses the file's raw text into its list of registered paths - one
-/// non-empty, trimmed, slash-normalized line each. Normalizing here
-/// (not just at the point of writing) means every reader — including
-/// `list_projects`, the shim's own boundary lookup, and an
-/// already-on-disk file written before this normalization existed —
-/// sees a consistent view without needing the raw file itself rewritten.
+/// non-empty, trimmed, slash-normalized line each. Normalizing at parse
+/// time (not just at write time) means every reader sees a consistent
+/// view without needing the raw file rewritten.
 #[allow(dead_code)]
 pub fn parse(text: &str) -> Vec<String> {
     text.lines()
@@ -47,13 +31,10 @@ pub fn parse(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// `true` iff `path` is not already present in `text` (the file's
-/// current content) - i.e., whether an append is needed. Callers do
-/// the actual file I/O: a plain, single `O_APPEND` write of just
-/// `path`, never a full rewrite - the same concurrency-safe discipline
-/// established for decision files and the shim's log file (multiple
-/// writers appending is safe by construction; rewriting the whole file
-/// is not).
+/// `true` iff `path` is not already present in `text`, i.e. whether an
+/// append is needed. Callers do the actual I/O as a single `O_APPEND`
+/// write, never a full rewrite: concurrent appends are safe, rewrites
+/// are not.
 #[allow(dead_code)]
 pub fn needs_append(text: &str, path: &str) -> bool {
     let normalized = normalize_root_path(path);

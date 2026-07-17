@@ -1,7 +1,6 @@
-//! XDG base directory resolution (§2). The pure `*_from` logic is
-//! shared with the LD_PRELOAD shim (see `shim/xdg_core.rs`'s doc
-//! comment) — the shim must resolve `compiled.tsv`'s path exactly the
-//! way these do, or a custom `XDG_DATA_HOME` would silently break it.
+//! XDG base directory resolution. The pure `*_from` logic is shared with
+//! the LD_PRELOAD shim, which must resolve `compiled.tsv`'s path exactly
+//! the same way or a custom `XDG_DATA_HOME` would silently break it.
 
 use std::path::PathBuf;
 

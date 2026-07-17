@@ -2,22 +2,12 @@
 // creation (`BTRFS_IOC_SUBVOL_CREATE`, per §5/§7).
 //
 // Dependency-free (plain `std`, plus hand-declared `extern "C"` for
-// `open`/`close`/`ioctl` — deliberately NOT the `libc` crate, since
-// this file is shared with the LD_PRELOAD shim via `mod`, and bare
-// `rustc` can't link crates.io crates). The ioctl request number and
-// struct layout aren't in `libc` either way (BTRFS-specific, not
-// POSIX) - hand-declared here the same way `<linux/btrfs.h>` defines
-// them, confirmed correct against a real BTRFS filesystem in this
-// sandbox (`/root`) via a standalone capability probe before writing
-// this module (see progress notes for Steps 8-9).
+// `open`/`close`/`ioctl`, not `libc`, since bare `rustc` can't link
+// crates.io crates). Ioctl request number and struct layout match
+// `<linux/btrfs.h>`, verified against a real BTRFS filesystem.
 //
-// Uses `std::io::Result` (not `anyhow::Result`, an external crate the
-// shim can't link) - the main crate's `anyhow`-based call sites absorb
-// this automatically via `?`'s `From` conversion. `is_btrfs`
-// (`statfs`-based filesystem-type check) stays out of this file: it's
-// CLI-only (root validation happens at `reload` time, not on the
-// shim's hot path — plan §8.0), so it's free to use the `libc` crate
-// instead, in `src/btrfs.rs` directly.
+// Uses `std::io::Result`, not `anyhow::Result`; `is_btrfs` stays
+// CLI-only in `src/btrfs.rs` and is free to use `libc` instead.
 
 use std::os::unix::fs::MetadataExt;
 

@@ -3,13 +3,8 @@
 use std::path::PathBuf;
 
 /// Where BTRFS-dependent tests create their scratch subvolumes.
-/// Override with `GHOSTVOLUMES_TEST_BTRFS_DIR` if your checkout isn't
-/// on a BTRFS filesystem but some other mounted location is. Defaults
-/// to `<CARGO_MANIFEST_DIR>/target/ghostvolumes-test-scratch` — the
-/// project's own build directory, which is BTRFS-backed whenever the
-/// checkout itself is (a reasonable default for a project whose whole
-/// point is BTRFS subvolumes, and avoids hardcoding any particular
-/// machine's layout, e.g. this sandbox's `/root`).
+/// Override with `GHOSTVOLUMES_TEST_BTRFS_DIR` if the checkout isn't on
+/// BTRFS. Defaults to `<CARGO_MANIFEST_DIR>/target/ghostvolumes-test-scratch`.
 fn btrfs_test_root() -> PathBuf {
     if let Ok(dir) = std::env::var("GHOSTVOLUMES_TEST_BTRFS_DIR") {
         return PathBuf::from(dir);
@@ -19,10 +14,8 @@ fn btrfs_test_root() -> PathBuf {
         .join("ghostvolumes-test-scratch")
 }
 
-/// A tempdir under `btrfs_test_root()` instead of the default `/tmp`
-/// (`tempfile::tempdir()`), which is very often a non-BTRFS overlay or
-/// tmpfs and would silently make BTRFS-dependent tests exercise the
-/// wrong filesystem.
+/// A tempdir under `btrfs_test_root()` instead of the default `/tmp`,
+/// which is often a non-BTRFS overlay/tmpfs.
 pub fn btrfs_scratch_dir() -> tempfile::TempDir {
     let parent = btrfs_test_root();
     std::fs::create_dir_all(&parent)

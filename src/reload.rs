@@ -1,7 +1,6 @@
-//! `ghostvolumes reload` (§8.0): load + merge config, validate every
-//! configured root is still BTRFS-backed, compile to `compiled.tsv`,
-//! write atomically. Also invoked automatically at the end of
-//! `scan --save`.
+//! `ghostvolumes reload`: load + merge config, validate every configured
+//! root is still BTRFS-backed, compile to `compiled.tsv`, write
+//! atomically. Also invoked automatically at the end of `scan --save`.
 
 use std::path::Path;
 
@@ -15,15 +14,8 @@ pub fn reload(config_dir: &Path, cache_path: &Path) -> anyhow::Result<()> {
 }
 
 /// Blocking-locks `<data_dir>/reload.lock` for the whole
-/// read-merge-validate-write sequence below (ai-work/tasks/atomic-file-io.plan.md
-/// §1), fully serializing concurrent `reload`/`scan --save` runs rather
-/// than just avoiding the byte-level temp-file corruption `atomic_write`
-/// already prevents on its own. `cache_path`'s parent is always the
-/// data dir in every real caller (`main.rs` always constructs it as
-/// `data_dir.join(COMPILED_CACHE_FILE_NAME)`) - deriving it here avoids
-/// adding a `data_dir` parameter nothing else in this function needs.
-/// Returns the held `File` - the caller keeps it alive for as long as
-/// the lock should be held; dropping it releases the lock.
+/// read-merge-validate-write sequence, serializing concurrent
+/// `reload`/`scan --save` runs. Dropping the returned `File` releases it.
 fn lock_for_reload(cache_path: &Path) -> anyhow::Result<std::fs::File> {
     let data_dir = cache_path.parent().ok_or_else(|| {
         anyhow::anyhow!(
@@ -80,13 +72,9 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    /// Bundles the `config_dir`/`cache_path` pair every test below
-    /// needs, plus the `TempDir` guard that must outlive them -
-    /// eliminates the repeated `tempdir()` + two `.join()`s at the top
-    /// of every test. Config is *not* written here - callers that want
-    /// it call `write_config_dir(&paths.config_dir)` themselves
-    /// (`empty_config_with_no_roots_needs_no_validation` deliberately
-    /// doesn't).
+    /// Bundles the `config_dir`/`cache_path` pair every test needs, plus
+    /// the `TempDir` guard that must outlive them. Config is *not*
+    /// written here; callers call `write_config_dir` themselves.
     struct TestPaths {
         _root: tempfile::TempDir,
         config_dir: PathBuf,
@@ -188,10 +176,8 @@ mod tests {
 
     #[test]
     fn real_reload_fails_on_this_sandbox_since_nothing_here_is_btrfs() {
-        // Exercises the *actual* `reload()` entry point (real statfs
-        // check) end-to-end. This sandbox has no BTRFS anywhere, so
-        // the only branch reachable here is the failure path — which
-        // is exactly what should happen on a non-BTRFS filesystem.
+        // Exercises the real reload() entry point end-to-end; this
+        // sandbox has no BTRFS, so only the failure path is reachable.
         let paths = test_paths();
         write_config_dir(&paths.config_dir); // "/home/user1" root, not BTRFS here
 

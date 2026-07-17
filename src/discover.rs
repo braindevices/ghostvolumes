@@ -1,57 +1,8 @@
-//! `ghostvolumes discover` (ai-work/tasks/decision-model.plan.md §7,
-//! redesigned per `ai-work/tasks/discover-redesign.plan.md`): a
-//! read-only survey of an arbitrary starting path (no project
-//! registration needed, unlike `convert`/`decide`) that classifies
-//! every *undecided* directory it finds into three kinds and suggests
-//! the exact `ghostvolumes decide` command to run for it — it never
-//! registers a project or writes a decision file itself.
-//!
-//! "Undecided" means genuinely undecided: `decision::resolve` is
-//! checked against `start` (the discover invocation's own argument) as
-//! the walk-up boundary, the same logic `convert`/`decide` use against
-//! their own registered boundary. Anything already covered by a `+`/
-//! `-` anywhere between a match and `start` is skipped entirely — this
-//! is what keeps the output meaningful instead of permanently re-
-//! suggesting things that are already fully decided.
-//!
-//! Three kinds for a genuinely undecided match (no `+`/`-` on record at
-//! all, in descending order of confidence), plus two drift kinds for a
-//! match where the filesystem disagrees with an *existing* decision:
-//! - [`MatchKind::ApprovedCandidate`]: a watched name that's already a
-//!   real subvolume — suggests `--add`.
-//! - [`MatchKind::UnwatchedSubvolume`]: already a real subvolume, but
-//!   an unwatched name — same underlying signal
-//!   (`convert`/`decide`'s own walk treats this identically, defaulting
-//!   to yes when it can ask interactively), but discover has no way to
-//!   ask, so it presents both `--add` and `--deny` rather than picking
-//!   one.
-//! - [`MatchKind::NotYetConverted`]: a watched name that's still a
-//!   plain directory — report-only, no command suggested. `-` would
-//!   misrepresent "nobody has decided" as "a human declined", the one
-//!   thing `-` means everywhere else in this project, so this is never
-//!   written as real decision syntax, only reported.
-//! - [`MatchKind::DeniedButExists`]: recorded `-`, but it's already a
-//!   subvolume anyway — a human declined this, yet it exists on disk
-//!   (made by hand afterward, most likely). Flagged as drift rather
-//!   than silently trusted either way.
-//! - [`MatchKind::ApprovedNotConverted`]: recorded `+`, but still a
-//!   plain directory — approved, just never materialized. Not really a
-//!   conflict, just informational: run `convert` to catch it up.
-//!
-//! Only on-disk mismatches are covered — a `+`/`?` decision recorded
-//! for a path that doesn't exist on disk at all isn't detected here,
-//! since the walk only ever visits directories that actually exist.
-//!
-//! `ignore_patterns` (Phase 2, `ai-work/tasks/convert-project-model.plan.md`)
-//! replaces what used to be a hardcoded `.git`-only skip — matched via
-//! `decision::ignore_matches`, anchored to each directory's own
-//! immediate parent as the walk descends (this only matters for an
-//! anchored pattern; a bare name like `.git` matches by leaf name alone
-//! regardless of anchor). Deliberately global-only here: `discover`
-//! isn't tied to any one registered project the way `convert` is (it
-//! walks an arbitrary starting path, `~` by default), so only the
-//! `default-ignore` tier applies — no volume-root/project-root
-//! `.ghostvolumes-ignore` file lookup, unlike `convert`'s walk.
+//! `ghostvolumes discover`: read-only survey that classifies every
+//! *undecided* directory into [`MatchKind`] kinds and suggests a
+//! `ghostvolumes decide` command, without registering a project or
+//! writing a decision file. A match already covered by a `+`/`-`
+//! between it and `start` is skipped so it isn't re-suggested.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -93,18 +44,12 @@ fn classify(resolved: Option<bool>, is_watched: bool, is_subvolume: bool) -> Opt
     }
 }
 
-/// Stat-walks from `start` (skipping anything matching
-/// `ignore_patterns` or exactly matching an `ignore_paths` entry,
-/// never descending into any of the three kinds above whether or not
-/// it turns out to be a subvolume — walking into a multi-gigabyte
-/// `node_modules` tree looking for more matches would be pointless and
-/// slow).
-///
-/// `ignore_paths` is a plain list of absolute directories to never
-/// scan at all — no report, no descent — distinct from
-/// `ignore_patterns`'s gitignore-style name matching: a user-specified
-/// exact path (e.g. a known-noisy cache directory) rather than a name
-/// pattern applied everywhere in the tree.
+/// Stat-walks from `start`, skipping anything matching `ignore_patterns`
+/// or an `ignore_paths` entry, and never descends into a matched
+/// directory (a match is never itself re-scanned for nested matches).
+/// `ignore_paths` is exact absolute directories to skip entirely (no
+/// report, no descent); `ignore_patterns` is gitignore-style name
+/// matching applied throughout the tree.
 pub fn walk(
     start: &Path,
     max_depth: Option<u32>,
@@ -245,13 +190,8 @@ pub fn group_by_parent(matches: Vec<DiscoveredMatch>) -> Vec<ProjectSuggestion> 
 }
 
 /// The shallowest *other* suggested path that's an ancestor of `path`,
-/// if any — two suggested groups in the same lineage would, if both
-/// were actually registered as projects, violate "no nested projects"
-/// (`ai-work/tasks/nested-project-boundaries.plan.md`). `decide`'s own
-/// `ensure_project_registered` already detects and warns about exactly
-/// this the moment you try to register both, but discover can go
-/// further and just not suggest two conflicting projects to begin
-/// with — see `merge_nested_suggestions`.
+/// if any — two suggested groups in the same lineage would violate "no
+/// nested projects" if both were registered. See `merge_nested_suggestions`.
 fn shallowest_ancestor_suggestion<'a>(
     path: &Path,
     all_paths: &'a [PathBuf],
@@ -262,30 +202,10 @@ fn shallowest_ancestor_suggestion<'a>(
         .min_by_key(|p| p.components().count())
 }
 
-/// Folds every suggestion that's nested inside another suggestion into
-/// that shallowest ancestor, so the report only ever proposes
-/// registering one project per lineage — matching "no nested
-/// projects" instead of merely warning about it. A folded-in name is
-/// re-expressed as `decision::anchored_pattern` relative to the
-/// ancestor (e.g. `/bb/cc/build`) so the single resulting `decide`
-/// command still targets the exact original path.
-///
-/// `start` (the discover invocation's own argument) is excluded from
-/// the pool of paths eligible to *absorb* another suggestion unless
-/// `root_is_project` says otherwise — `start` is usually a broad,
-/// arbitrary directory being surveyed (`$HOME`, a workspace folder),
-/// not itself a project; without this, a `start` that happens to have
-/// its own unrelated finding (e.g. a stray subvolume directly inside
-/// it) would swallow every other suggestion found anywhere below it,
-/// however unrelated, purely by virtue of being the shallowest path in
-/// the whole report. `start`'s own findings are still reported as
-/// their own group either way — this only controls whether other
-/// suggestions can fold *into* it.
-///
-/// `no_project` is the same exclusion, but user-declared and always
-/// applied regardless of `root_is_project` — for a known-not-a-project
-/// container found *below* `start` (e.g. a workspace folder holding
-/// many unrelated repos), not just `start` itself.
+/// Folds every suggestion nested inside another into that shallowest
+/// ancestor, so the report proposes at most one project per lineage.
+/// `start` can't absorb other suggestions unless `root_is_project` is
+/// set; `no_project` applies that same exclusion to other paths.
 pub fn merge_nested_suggestions(
     suggestions: Vec<ProjectSuggestion>,
     start: &Path,
@@ -354,13 +274,10 @@ fn fold_nested_child(
         .extend(child.approved_not_converted.iter().map(|n| anchor(n)));
 }
 
-/// Renders suggestions as human-facing advice — a `ghostvolumes
-/// decide` command per actionable group, plus a report-only line for
-/// watched names that exist but aren't converted yet. Never anything
-/// resembling raw decision-file syntax to paste in: `decide` is the
-/// only thing that ever writes a decision, so it's the only thing this
-/// ever tells you to run. Call `merge_nested_suggestions` first if
-/// `suggestions` might contain nested paths — this only renders what
+/// Renders suggestions as human-facing advice — a `ghostvolumes decide`
+/// command per actionable group, plus a report-only line for watched
+/// names not yet converted. Call `merge_nested_suggestions` first if
+/// `suggestions` might contain nested paths; this only renders what
 /// it's given.
 pub fn format_report(suggestions: &[ProjectSuggestion]) -> String {
     let mut out = String::new();
@@ -513,10 +430,8 @@ mod tests {
 
     #[test]
     fn a_decision_recorded_above_start_still_suppresses_the_match() {
-        // Same "closest enclosing file wins, walked up to the
-        // boundary" semantics as convert/decide - here `start` is the
-        // boundary, so a decision file at `start` itself still governs
-        // a match found in a subdirectory.
+        // `start` is the boundary, so a decision file there still
+        // governs a match found in a subdirectory.
         let dir = btrfs_scratch_dir();
         std::fs::create_dir_all(dir.path().join("nested")).unwrap();
         btrfs::create_subvolume(&dir.path().join("nested"), "node_modules").unwrap();
@@ -599,10 +514,8 @@ mod tests {
 
     #[test]
     fn without_a_matching_ignore_pattern_a_dot_directory_is_walked_into_like_any_other() {
-        // The generalization this guards: `.git` has no special status
-        // in the walk itself anymore - it's only skipped because
-        // `default-ignore` names it, same as any other configured
-        // pattern.
+        // `.git` has no special status in the walk; it's skipped only
+        // because `default-ignore` names it, like any other pattern.
         let dir = btrfs_scratch_dir();
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         btrfs::create_subvolume(&dir.path().join(".git"), "node_modules").unwrap();
@@ -853,11 +766,8 @@ mod tests {
         // not left as separate conflicting suggestions.
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].path, PathBuf::from("/a/b"));
-        // Its own direct match keeps its bare name; the two folded-in
-        // descendants become anchored patterns relative to /a/b, each
-        // pointing at its own exact original location - not just its
-        // own immediate parent's name, since /a/b/c/d's "build" would
-        // otherwise be indistinguishable from /a/b/c's.
+        // Folded-in descendants become anchored patterns relative to
+        // /a/b, pointing at their exact original location.
         assert_eq!(
             merged[0].approved,
             vec![
@@ -888,10 +798,8 @@ mod tests {
 
     #[test]
     fn merge_nested_suggestions_does_not_fold_into_the_discover_start_path_by_default() {
-        // /root here stands in for a broad, arbitrary directory being
-        // surveyed ($HOME, a workspace folder) that happens to have its
-        // own unrelated finding - it must not swallow an unrelated,
-        // much deeper project just for being the shallowest path.
+        // /root must not swallow an unrelated, deeper project just for
+        // being the shallowest path.
         let suggestions = vec![
             ProjectSuggestion {
                 path: PathBuf::from("/root"),

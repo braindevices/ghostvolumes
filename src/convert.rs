@@ -1,101 +1,13 @@
-//! `ghostvolumes convert <path> [--create <relative-path>]...`
-//! (ai-work/tasks/decision-model.plan.md §6, extended by
-//! ai-work/tasks/convert-project-model.plan.md Phase 1): a recursive
-//! walk-and-resolve, not just a single-leaf migration.
-//!
-//! `<path>` is *only ever* the project: the decision-file/project-roots
-//! boundary. It is never itself added to the candidate list and never
-//! itself converted — conflating "the project" with "a thing that
-//! might get converted" under one argument was the source of real
-//! confusion (naming an arbitrary directory would silently make it
-//! *become* the registered project-roots boundary the moment any
-//! nested decision got recorded, regardless of whether that directory
-//! was ever meant to be treated as one project). If `<path>` isn't
-//! already covered by a registered project, `convert`/`decide` ask
-//! *once, upfront*, before touching any candidate — see
-//! `ensure_project_registered`'s own doc comment for the full
-//! decision tree (plain registration ask, a same-volume nesting
-//! conflict, or an orphaned ancestor decision file all get handled
-//! differently). Declining (in any branch), or no TTY at all, aborts
-//! the whole command — registration is a hard prerequisite now, not a
-//! side effect to guess at. **Nested project registration is
-//! disallowed**: at most one registered project can ever cover a given
-//! path (`ai-work/tasks/nested-project-boundaries.plan.md`) — decision
-//! and ignore files already self-distribute via their own closest-
-//! file-wins walk-up, so a hierarchy of registered projects was never
-//! providing anything a single, correct stopping boundary doesn't
-//! already give.
-//!
-//! Three ways a path becomes a candidate:
-//! - The walk: every directory under `<path>` that's either a watched
-//!   name under a configured root, or already a real BTRFS subvolume
-//!   regardless of its name (`find_nested_candidates`, reusing
-//!   `discover`'s tree-walking conventions — skip anything matching an
-//!   ignore pattern, optional `--max-depth`, never descend into a
-//!   match). Ignore patterns (Phase 2,
-//!   `ai-work/tasks/convert-project-model.plan.md`) union three tiers:
-//!   the global `default-ignore` list, the nearest configured *volume*
-//!   root's own `.ghostvolumes-ignore` file, and `<path>`'s own
-//!   `.ghostvolumes-ignore` file — see `is_ignored`.
-//! - `--create <relative-path>` (repeatable): explicitly names a
-//!   specific target (relative to `<path>`) to resolve directly,
-//!   bypassing the watched-name-match requirement entirely — the
-//!   direct replacement for what naming `<path>` itself used to do,
-//!   now unambiguous since the project and its candidates are
-//!   structurally different things (positional argument vs. flag).
-//! - `decision_file_anchored_candidates`: any anchored, wildcard-free
-//!   `+`/`?` pattern already in `boundary`'s own decision file —
-//!   surfaces something the walk could never discover on its own,
-//!   because its target doesn't exist on disk yet or doesn't match any
-//!   watched name at all. An anchored `+` decision is the *persisted*
-//!   equivalent of `--create`: recording it once keeps being honored
-//!   on every future run, not just the one where `--create` was
-//!   passed — without this, a decision for an unwatched, not-yet-
-//!   created name would silently never actually get materialized.
-//!
-//! Each candidate, resolved shallowest-first (so an "every match of
-//! this name" answer for a shallow candidate is already reflected by
-//! the time a same-named, `**`-covered deeper one is resolved, instead
-//! of asking twice):
-//! - Already a subvolume → skip silently.
-//! - A `+` decision already exists → convert directly, no asking.
-//! - A `-` decision already exists → skip silently, unless this exact
-//!   candidate was explicitly named via `--create` (a deliberate
-//!   override attempt), in which case confirm before proceeding.
-//! - Undecided (or doesn't exist yet), at a real TTY → ask "convert
-//!   (and remember) this?" *before* touching the filesystem at all.
-//!   "yes"/"all" converts (create empty, or copy-and-swap if already a
-//!   plain directory) and records a `+` decision. "no" (or an
-//!   empty/garbage answer) converts nothing and records a `-` decision
-//!   instead — a real, deliberate decline, not silently forgotten.
-//! - Undecided, no TTY at all (a script, cron job, or CI run) → can't
-//!   ask, so don't: converts nothing, and appends a pending `?` marker
-//!   noting the candidate, the same mechanism the shim itself already
-//!   uses for the identical situation — a later real decision for the
-//!   same pattern toggles that marker in place; a human can also turn
-//!   it into a real `+`/`-` line by hand.
-//!
-//! Every actual filesystem-mutating step (`create_empty`/
-//! `copy_and_swap`'s create/cp/rename/remove calls) prints a line to
-//! stdout as it happens — unlike the shim, which can't touch stdout at
-//! all (it's injected into arbitrary processes with no such
-//! guarantee), `convert` is a deliberate, foreground, human-run
-//! command, so there's no reason for it to be silent about what it did.
-//! Separately, with `GHOSTVOLUMES_DEBUG=debug` (or more verbose) set —
-//! see `ai-work/tasks/leveled-verbosity.plan.md` for the full
-//! `error`/`warn`/`info`/`debug`/`trace` scale, shared with the shim's
-//! own debug logging — `resolve_candidate` also traces *why* each
-//! candidate resolved the way it did (already a subvolume, an existing
-//! decision found at which boundary, or undecided) to stderr (or
-//! `GHOSTVOLUMES_LOG_FILE`, if set) — this is what a raw, unconditional
-//! `println!` sprinkled in ad hoc while debugging a specific issue
-//! should have been from the start.
-//!
-//! Unlike Phase 1, project registration is no longer a side effect of
-//! recording a decision — `ensure_project_registered` runs once,
-//! upfront, before any candidate is touched, and every candidate in a
-//! run resolves against the same, already-registered
-//! `decision_boundary`.
+//! `ghostvolumes convert <path> [--create <relative-path>]...` recursively
+//! walks `<path>` and resolves each candidate directory to either convert
+//! it to a BTRFS subvolume or record a decision about it. `<path>` itself
+//! is the decision-file/project-roots boundary and is never a candidate;
+//! at most one registered project can ever cover a given path. Candidates
+//! come from the recursive walk, `--create`, and anchored decision-file
+//! patterns, resolved shallowest-first. Per candidate: already a
+//! subvolume -> skip; `+` -> convert; `-` -> skip (confirm if named via
+//! `--create`); undecided at a TTY -> ask; undecided, no TTY -> leave a
+//! pending `?` marker. `ensure_project_registered` runs once upfront.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -105,24 +17,15 @@ use crate::debug::{Verbosity, trace};
 use crate::{btrfs, cache, decision, filenames, merge, project_roots, projects};
 
 /// What resolving a candidate's decision should actually *do*, decomposed
-/// into two independent capabilities
-/// (`ai-work/tasks/decide-walk-and-markers.plan.md`) — `convert` and
-/// `decide` are just two of the four combinations; a hypothetical
-/// future "apply only what's already decided, ignore anything
-/// undecided" mode (`Mode { decide: false, convert: true }`) needs no
-/// further plumbing changes when it's ever wanted. Named fields, not
-/// two bare positional `bool`s, so a call site can't silently swap
-/// them with nothing catching it at compile time.
+/// into two independent capabilities. `convert` and `decide` are two of
+/// the four combinations of these named fields (not bare `bool`s, so a
+/// call site can't silently swap them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Mode {
-    /// Consider undecided candidates at all — ask (if a TTY) or leave
-    /// a pending `?` marker (if not). `false` means anything without
-    /// an existing decision is silently skipped, no marker either —
-    /// this is a genuinely different outcome than "asked, but no TTY
-    /// available" (which still leaves a marker), not the same thing;
-    /// `is_tty` stays its own, separate parameter for exactly this
-    /// reason — it answers "can we get a real answer right now", not
-    /// "do we want one at all".
+    /// Consider undecided candidates at all — ask (if a TTY) or leave a
+    /// pending `?` marker (if not). `false` skips silently, no marker.
+    /// Distinct from `is_tty`: this is "do we want an answer at all",
+    /// not "can we get one right now".
     decide: bool,
     /// Actually materialize an approved candidate (an existing `+`, or
     /// a freshly-answered "yes"). `false` means only ever record or
@@ -159,15 +62,10 @@ fn parse_remember_answer(line: &str) -> RememberChoice {
     }
 }
 
-/// Asks the "convert (and remember)?"/"decide (and remember)?"
-/// question and parses the answer - always actually asks, unlike
-/// `confirm_override`. Whether to ask at all based on `is_tty` is the
-/// caller's call (`ask_and_maybe_convert`), since a non-interactive run
-/// needs a different fallback (a pending marker, not a recorded deny)
-/// than an interactive "no" does - a distinction this function doesn't
-/// need to know about. The verb in the prompt is `mode`-aware -
-/// asking "Convert...?" when `decide` will never actually convert,
-/// even on "yes", would be misleading.
+/// Asks the "convert (and remember)?"/"decide (and remember)?" question
+/// and parses the answer. Always asks — whether to ask at all (`is_tty`)
+/// is the caller's call. The verb is `mode`-aware so `decide` never
+/// claims it will "Convert" when it won't.
 fn ask_remember(
     candidate: &Path,
     mode: Mode,
@@ -207,15 +105,10 @@ fn confirm_override(
     }
 }
 
-/// Asks about an already-a-subvolume candidate that has no recorded
-/// decision at all — states the reason outright (unlike `ask_remember`'s
-/// generic "convert (and remember)?", there's nothing left to convert
-/// here, only a decision to record). Defaults to **yes** on an empty
-/// answer, unlike every other ask in this file (which defaults to
-/// declining, since it gates an actual filesystem mutation) — in the
-/// overwhelming common case a directory that's already a real
-/// subvolume was made that way specifically to hold volatile build
-/// output, not by accident.
+/// Asks about an already-a-subvolume candidate with no recorded decision
+/// — only a decision to record, nothing left to convert. Defaults to
+/// **yes** on an empty answer (unlike every other ask here), since an
+/// existing subvolume was most likely made that way on purpose.
 fn ask_about_existing_subvolume(
     candidate: &Path,
     read_line: impl FnOnce() -> Option<String>,
@@ -234,10 +127,8 @@ fn ask_about_existing_subvolume(
     }
 }
 
-/// `pub(crate)` rather than private - `projects::unregister`'s
-/// auto-scan-and-prune mode reuses this exact injectable-stdin-reader
-/// shape (see `ask_remember`/`confirm_override` above) rather than
-/// duplicating it.
+/// `pub(crate)` since `projects::unregister`'s auto-scan-and-prune mode
+/// reuses this same injectable-stdin-reader shape.
 pub(crate) fn read_stdin_line() -> Option<String> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).ok()?;
@@ -248,39 +139,22 @@ fn read_decision_file(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// `true` iff `a` and `b` fall under the same configured `roots.d`
-/// volume (the same `cache::longest_matching_prefix` result, including
-/// both being `None` — neither covered by any configured root at all).
-/// Two paths can be ancestor/descendant of each other in plain path
-/// terms while sitting on *different* BTRFS roots (a narrower row
-/// nested inside a broader one) — `ai-work/tasks/nested-project-boundaries.plan.md`
-/// bug #2. Path containment alone is never enough to decide whether one
-/// registered project's scope legitimately extends to cover another
-/// path; it must also be the same volume.
+/// `true` iff `a` and `b` fall under the same configured `roots.d` volume
+/// (same `cache::longest_matching_prefix` result, including both `None`).
+/// Path containment alone doesn't imply same volume — a narrower row can
+/// nest inside a broader one — so both must be checked.
 fn same_volume(rows: &[(String, String)], a: &Path, b: &Path) -> bool {
     cache::longest_matching_prefix(rows, a) == cache::longest_matching_prefix(rows, b)
 }
 
-/// The decision-file (and ignore-file project-root tier's) walk-up
-/// boundary for the whole `convert`/`decide` run — computed *once* from
-/// `project_path` alone, not per-candidate, since nested project
-/// registration is disallowed (enforced at `ensure_project_registered`
-/// time, see its own doc comment): there is at most one registered
-/// project that can ever cover `project_path`, so there's nothing to
-/// pick "the more specific of several" from the way the old
-/// `walkup_boundary` tried to.
-///
-/// Finds the registered project that is both an ancestor-or-self of
-/// `project_path` *and* on the same volume (`same_volume`) — a project
-/// that's a path-ancestor but on a different, more specific volume
-/// doesn't count (bug #2); falls back to `project_path` itself if
-/// nothing qualifies (by the time this runs, `ensure_project_registered`
-/// has already guaranteed `project_path` itself is covered, one way or
-/// another). Deliberately never falls back further to a bare
-/// `rows`/volume prefix — that's `project_roots` existing precisely to
-/// avoid: letting decision resolution wander into broad, incidental
-/// root territory rather than staying scoped to a real, registered
-/// project.
+/// The decision-file/ignore-file walk-up boundary for the whole
+/// `convert`/`decide` run, computed once from `project_path` (nested
+/// project registration is disallowed, so there's at most one covering
+/// project to find). Finds the registered project that is an
+/// ancestor-or-self of `project_path` *and* on the same volume
+/// (`same_volume`); falls back to `project_path` itself if none
+/// qualifies. Never falls back to a bare volume-root prefix — that
+/// would let resolution wander outside a real registered project.
 fn decision_boundary(
     rows: &[(String, String)],
     project_roots: &[String],
@@ -290,10 +164,8 @@ fn decision_boundary(
         .iter()
         .map(Path::new)
         .filter(|root| project_path.starts_with(root) && same_volume(rows, root, project_path))
-        // Shortest (shallowest) of any qualifying matches - the top of
-        // a nested chain of same-volume registered projects, so
-        // resolve()'s own walk-up checks every level's decision file
-        // down to project_path instead of stopping at the deepest one.
+        // Shallowest of any qualifying matches, so the walk-up checks
+        // every level's decision file instead of stopping at the deepest.
         .min_by_key(|root| root.as_os_str().len())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| project_path.to_path_buf())
@@ -311,21 +183,16 @@ fn containing_dir_pattern(boundary: &Path, candidate: &Path, name: &str) -> Stri
     }
 }
 
-/// Idempotently registers `boundary` into the project-roots list (§3),
-/// both on disk (via `projects::register`, so later `convert`/shim
-/// invocations see it too) and in the in-memory `project_roots` list
-/// (so later candidates *within this same run* see it without a second
-/// disk read).
+/// Idempotently registers `boundary` into the project-roots list, both
+/// on disk (`projects::register`) and in the in-memory list (so later
+/// candidates in this same run see it without a second disk read).
 fn register_project_root(
     boundary: &Path,
     project_roots: &mut Vec<String>,
     project_roots_path: &Path,
 ) -> anyhow::Result<()> {
-    // `Path::display()` essentially never produces a trailing slash on
-    // its own, but normalizing here too keeps this in-memory list (used
-    // for this same run's own dedup checks) consistent with whatever
-    // `projects::register` writes to disk, rather than relying on that
-    // being incidentally true.
+    // Normalize here too so this in-memory list stays consistent with
+    // whatever `projects::register` writes to disk.
     let boundary_str = crate::project_roots::normalize_root_path(&boundary.display().to_string());
     if !project_roots.iter().any(|r| r == &boundary_str) {
         project_roots.push(boundary_str.clone());
@@ -333,15 +200,11 @@ fn register_project_root(
     projects::register(project_roots_path, &boundary_str)
 }
 
-/// Blocking-locks `boundary`'s decisions lock file
-/// (`locks/decisions/<boundary>.lock`, distinct from `materialize`'s
-/// own `locks/<boundary>.lock` for subvolume creation) around any
-/// read-then-write of the decision file - needed because toggling a
-/// pending marker into a real decision is a read-modify-write, unlike
-/// every other decision-file write, which was ever only a pure append.
-/// Blocking is fine here (unlike the shim's non-blocking equivalent):
-/// `convert` is an explicit, occasional, human-run command, not
-/// something injected into an arbitrary intercepted call.
+/// Blocking-locks `boundary`'s decisions lock file (distinct from
+/// `materialize`'s subvolume-creation lock) around any read-then-write
+/// of the decision file, since toggling a pending marker is a
+/// read-modify-write, unlike a plain append. Blocking is fine: `convert`
+/// is an explicit, occasional, human-run command.
 fn lock_decisions(data_dir: &Path, boundary: &Path) -> anyhow::Result<std::fs::File> {
     let lock_path = crate::lock::boundary_lock_path(
         &data_dir.join(filenames::LOCKS_DIR).join("decisions"),
@@ -353,13 +216,9 @@ fn lock_decisions(data_dir: &Path, boundary: &Path) -> anyhow::Result<std::fs::F
 }
 
 /// Appends a `? <pattern>` pending-marker line noting `candidate` as
-/// still undecided — the exact mechanism the shim itself already uses
-/// for the same situation (`shim/preload.rs`'s `append_pending_marker`,
-/// via the same `decision::anchored_pattern`/`pending_marker_line`/
-/// `needs_pending_marker` trio), reused here rather than duplicated so
-/// a candidate `convert` can't ask about (no TTY - a script, cron job,
-/// or CI run) leaves the same trail a human can later turn into a real
-/// `+`/`-` line by hand.
+/// still undecided — the same mechanism the shim uses, so a candidate
+/// `convert` can't ask about (no TTY) leaves a trail a human can later
+/// turn into a real `+`/`-` line by hand.
 fn append_pending_marker(data_dir: &Path, boundary: &Path, candidate: &Path) -> anyhow::Result<()> {
     let Some(pattern) = decision::anchored_pattern(boundary, candidate) else {
         return Ok(());
@@ -379,25 +238,13 @@ fn append_pending_marker(data_dir: &Path, boundary: &Path, candidate: &Path) -> 
     Ok(())
 }
 
-/// Records a real `+`/`-` decision (`prefix` is `"+"` or `"-"`,
-/// `decision_pattern` its own pattern) for `boundary`'s decision file,
-/// replacing whatever pending marker `anchored_pattern` (the pattern a
-/// prior undecided-candidate note for this exact candidate would have
-/// used) refers to — `toggle_or_replace_pending` only matches against
-/// `anchored_pattern` to find the line; it doesn't care whether the
-/// replacement's own pattern matches too. So this is a true in-place
-/// same-line swap even for "a"/every-match-of-this-name, whose
-/// `decision_pattern` is a broader pattern than the anchored marker it
-/// supersedes: no need to remove the marker and append the broader
-/// line separately at the end, just put the new content where the
-/// marker already was. Falls back to a plain append (unchanged file
-/// position) only when there was no pending marker to begin with.
-///
-/// Rewrites the whole file (`atomic_write::write_atomically`, not a
-/// plain append) under `lock_decisions` - the first read-modify-write
-/// on a decision file in this whole design, needing both the lock (so
-/// it can't race a concurrent shim append) and an atomic replace (so a
-/// reader never observes a half-written file).
+/// Records a real `+`/`-` decision (`prefix` is `"+"` or `"-"`) for
+/// `boundary`'s decision file, replacing any pending marker matching
+/// `anchored_pattern` in place — even when `decision_pattern` is a
+/// broader pattern than the marker it supersedes. Falls back to a plain
+/// append if there was no pending marker. Rewrites the whole file
+/// atomically under `lock_decisions`, so a reader never sees a
+/// half-written file and this can't race a concurrent shim append.
 fn record_decision(
     data_dir: &Path,
     boundary: &Path,
@@ -414,25 +261,11 @@ fn record_decision(
     crate::atomic_write::write_atomically(&file_path, &updated)
 }
 
-/// Asks "convert this?" *before* touching the filesystem at all. Three
-/// outcomes, none of which leave a candidate silently forgotten:
-/// - No TTY at all (a script, cron job, or CI run) - can't ask, so
-///   don't: append a pending `?` marker instead (same as the shim's
-///   own undecided-candidate handling) and convert nothing.
-/// - Answered "no" (or empty/garbage) at an actual prompt - a real,
-///   deliberate decision, not just "couldn't ask": record a `-` for
-///   this exact path, same as if it had been hand-authored, and
-///   convert nothing.
-/// - Answered "yes"/"all" - convert, then record the `+` decision. Only
-///   after a successful `materialize` - a failed conversion must never
-///   leave a `+` line for something that was never actually converted.
-///
-/// Ask-before-acting throughout (matches `confirm_override`'s existing
-/// posture for an existing `-` decision) rather than converting
-/// unconditionally and only asking afterward whether to persist it -
-/// the original, surprising order, where a candidate would already be
-/// a subvolume by the time a human saw a prompt they could still say
-/// "no" to.
+/// Asks "convert this?" *before* touching the filesystem. No TTY ->
+/// leave a pending `?` marker, convert nothing. "No"/empty -> record a
+/// `-`, convert nothing. "Yes"/"all" -> convert, then record `+` (only
+/// after `materialize` succeeds, so a failed conversion never leaves a
+/// `+` for something not actually converted).
 fn ask_and_maybe_convert(
     candidate: &Path,
     boundary: &Path,
@@ -444,11 +277,8 @@ fn ask_and_maybe_convert(
     let anchored = decision::anchored_pattern(boundary, candidate)
         .unwrap_or_else(|| candidate.display().to_string());
     if !is_tty {
-        // Always printed, not silent - the shim's own handling of the
-        // identical situation logs this unconditionally too ("this is
-        // the one signal a human has that a decision is waiting to be
-        // made, so it can't be silent-by-default"), and convert already
-        // reports every other real step it takes.
+        // Always printed: the one signal a human has that a decision is
+        // waiting to be made.
         println!(
             "skip: {} (undecided — run with a TTY to decide, or edit the decision file by hand)",
             candidate.display()
@@ -476,11 +306,8 @@ fn ask_and_maybe_convert(
     record_decision(data_dir, boundary, &anchored, &pattern, "+")
 }
 
-/// Creates `target` directly as a fresh, empty subvolume — replaces
-/// cd-hook's old proactive pre-creation (§6). Creates any missing
-/// parent directories first (the common case is a parent that already
-/// exists; only the literal `<path>` argument could plausibly need
-/// this).
+/// Creates `target` directly as a fresh, empty subvolume, creating any
+/// missing parent directories first.
 fn create_empty(target: &Path) -> anyhow::Result<()> {
     let parent = target
         .parent()
@@ -492,13 +319,9 @@ fn create_empty(target: &Path) -> anyhow::Result<()> {
         .into_owned();
     std::fs::create_dir_all(parent)?;
 
-    // AlreadyExists is tolerated, not propagated - materialize()'s own
-    // lock (ai-work/tasks/atomic-file-io.plan.md §6/§7) makes this rare
-    // (the shim can't be mid-creation while this lock is held), but the
-    // shim could still have won a race and created it just before this
-    // call took the lock. Either way the desired end state - target is
-    // a subvolume - already holds, matching the shim's own
-    // try_create_subvolume tolerance for the identical race.
+    // AlreadyExists is tolerated: the shim could have won a race and
+    // created it just before this call took the lock, but the desired
+    // end state (target is a subvolume) still holds either way.
     match btrfs::create_subvolume(parent, &name) {
         Ok(()) => {
             println!("create: {} (new empty subvolume)", target.display());
@@ -509,12 +332,9 @@ fn create_empty(target: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Creates a new subvolume at a temp sibling path, `cp -a
-/// --reflink=always`s the existing plain directory's contents in
-/// (cheap on BTRFS: extent-sharing metadata, not a real copy, though
-/// still a full tree walk so cost scales with file count not size),
-/// then atomically swaps it into place and removes the old plain
-/// directory.
+/// Creates a subvolume at a temp sibling path, `cp -a --reflink=always`s
+/// the existing plain directory's contents in, then atomically swaps it
+/// into place and removes the old directory.
 fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -575,16 +395,10 @@ fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Blocking-locks `boundary`'s per-project lock file
-/// (ai-work/tasks/atomic-file-io.plan.md §6) around the create/copy
-/// /rename sequence below - coordinates with the shim's own
-/// `try_create_subvolume`, which takes the same lock (non-blocking)
-/// before creating a subvolume for any candidate under this same
-/// boundary. Blocking is fine here (unlike the shim): `convert` is an
-/// explicit, occasional, human-run command, not something injected
-/// into an arbitrary intercepted call. Held only around this
-/// operation, not the interactive "remember this?" prompt that runs
-/// before it - that could take arbitrarily long, and there's no need
-/// to hold the lock while waiting on a human.
+/// around the create/copy/rename sequence — coordinates with the shim's
+/// own (non-blocking) lock on the same boundary. Blocking is fine here
+/// since `convert` is a human-run command. Held only around this
+/// operation, not the "remember this?" prompt before it.
 fn materialize(target: &Path, boundary: &Path, data_dir: &Path) -> anyhow::Result<()> {
     let lock_path = crate::lock::boundary_lock_path(&data_dir.join(filenames::LOCKS_DIR), boundary);
     let lock_file = crate::lock::open_lock_file(&lock_path)?;
@@ -600,32 +414,12 @@ fn read_ignore_file(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Should `candidate` (a directory the walk is about to check/recurse
-/// into) be skipped entirely — never even checked for a watched-name
-/// match? Three tiers, unioned (Phase 2,
-/// `ai-work/tasks/convert-project-model.plan.md`):
-/// - `global_ignore` (the merged `default-ignore` list), anchored to
-///   `candidate`'s own parent directory — the natural anchor for the
-///   common bare-name case (e.g. `.git`), since an unanchored pattern
-///   matches by leaf name alone regardless of what anchor is used; an
-///   anchored global pattern is a degenerate, rare case this anchor
-///   choice doesn't handle meaningfully, but there's no single
-///   "correct" anchor for a pattern with no natural directory of its
-///   own.
-/// - The nearest configured *volume* root's own `.ghostvolumes-ignore`
-///   file, found via `cache::longest_matching_prefix` — the same
-///   computation `decision_boundary` uses (for a different purpose) for
-///   decisions.
-/// - `boundary`'s own `.ghostvolumes-ignore` file — `boundary` is the
-///   resolved `decision_boundary` for this run (either `project_path`
-///   itself, or a shallower already-registered covering project), so
-///   this tier stays consistent with decision resolution rather than
-///   always reading `project_path`'s own file even when a shallower
-///   project is the one actually in effect.
-///
-/// Unlike decision files, an ignore file is read fresh at each
-/// directory visited rather than cached across the walk — simpler, and
-/// this isn't a hot path the way per-syscall shim logic is.
+/// Should `candidate` be skipped entirely by the walk, never even
+/// checked for a watched-name match? Unions three tiers: the global
+/// `default-ignore` list (anchored to `candidate`'s parent), the nearest
+/// configured volume root's own `.ghostvolumes-ignore`, and `boundary`'s
+/// own `.ghostvolumes-ignore`. Ignore files are read fresh per directory
+/// rather than cached, unlike decision files.
 fn is_ignored(
     rows: &[(String, String)],
     boundary: &Path,
@@ -654,15 +448,10 @@ fn is_ignored(
     false
 }
 
-/// Every candidate implied by an anchored, wildcard-free `+`/`?`
-/// pattern in `boundary`'s own decision file — surfaces something the
-/// filesystem walk could never discover on its own, because its target
-/// doesn't exist on disk yet, or doesn't match any watched name at all
-/// (an anchored `+` decision is the *persisted* equivalent of
-/// `--create`: recording it once should keep being honored on every
-/// future run, not just the one where `--create` was passed). Shared
-/// by `convert` and `decide` — the only difference between them is
-/// `Mode`, same as everywhere else in the per-candidate resolution.
+/// Every candidate implied by an anchored, wildcard-free `+`/`?` pattern
+/// in `boundary`'s decision file — surfaces targets the filesystem walk
+/// can't discover on its own (doesn't exist yet, or isn't a watched
+/// name). Shared by `convert` and `decide`.
 fn decision_file_anchored_candidates(boundary: &Path) -> Vec<PathBuf> {
     let text =
         std::fs::read_to_string(boundary.join(filenames::DECISION_FILE_NAME)).unwrap_or_default();
@@ -672,20 +461,12 @@ fn decision_file_anchored_candidates(boundary: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Walks `project_path`'s subtree (skipping anything `is_ignored`,
-/// never descending into a match — same conventions as
-/// `discover::walk`), collecting every directory that's either a
-/// watched name under a configured root at its own location
-/// (`cache::names_for`, which is root-scoped, so this naturally
-/// excludes anything outside every configured root) *or* already a
-/// real BTRFS subvolume regardless of its name — an existing subvolume
-/// is itself evidence someone already decided to convert it, whether
-/// or not its name is (or ever was) on the watch list.
-/// `project_path` itself is not included — the caller already knows
-/// never to treat it as a candidate. `boundary` is the resolved
-/// `decision_boundary` for this run, threaded through separately from
-/// the walk's own recursion cursor purely for `is_ignored`'s
-/// project-root ignore-file tier.
+/// Walks `project_path`'s subtree (skipping `is_ignored`, never
+/// descending into a match), collecting every directory that's either a
+/// watched name under a configured root, or already a real BTRFS
+/// subvolume regardless of name. `project_path` itself is never
+/// included. `boundary` is threaded through separately for
+/// `is_ignored`'s project-root ignore-file tier.
 fn find_nested_candidates(
     project_path: &Path,
     boundary: &Path,
@@ -738,15 +519,8 @@ fn find_nested_candidates_inner(
         if is_ignored(rows, boundary, global_ignore, &path) {
             continue;
         }
-        // A real, already-existing subvolume is itself direct evidence
-        // someone already decided to convert it - a candidate
-        // regardless of whether its name happens to be on the watch
-        // list right now (a name could've been watched when it was
-        // created and removed from the list since, or converted by
-        // hand for a name nobody thought to add at all).
-        // `resolve_candidate` asks about it (defaulting to yes) if it
-        // has no decision yet - never descended into either way, same
-        // as a watched-name match.
+        // An existing subvolume is a candidate regardless of whether its
+        // name is on the watch list; never descended into either way.
         if names.contains(name_str.as_ref()) || btrfs::is_subvolume(&path).unwrap_or(false) {
             out.push(path);
             continue; // never descend into a match
@@ -763,15 +537,9 @@ fn find_nested_candidates_inner(
     }
 }
 
-/// `boundary` is the whole run's precomputed `decision_boundary` — the
-/// same value for every candidate, no longer recomputed per-candidate
-/// (see `decision_boundary`'s own doc comment for why that's now
-/// correct rather than a loss of precision).
-/// Prints what `resolve_candidate`'s `Some(true)` branch would do
-/// without doing it — mirrors `materialize`'s own real
-/// create-vs-migrate split (`ai-work/tasks/convert-project-model.plan.md`
-/// Phase 3), since a dry run should say which of the two a real run
-/// would actually perform.
+/// Prints what `resolve_candidate`'s `Some(true)` branch would do,
+/// without doing it — mirrors `materialize`'s create-vs-migrate split so
+/// a dry run reports which of the two a real run would perform.
 fn report_would_materialize(candidate: &Path) {
     if candidate.exists() {
         println!(
@@ -786,14 +554,10 @@ fn report_would_materialize(candidate: &Path) {
     }
 }
 
-/// `boundary` is the whole run's precomputed `decision_boundary`, `dry_run`
-/// short-circuits every branch that would otherwise mutate the
-/// filesystem, the decision file, or prompt — printing what *would*
-/// happen instead (Phase 3, `ai-work/tasks/convert-project-model.plan.md`).
-/// Every dry-run message is a plain, unconditional `println!` (not
-/// gated by verbosity) since it's the direct, primary output of the
-/// command, the same way a real run's `create:`/`cp -a:`/`rename:`
-/// lines already are.
+/// `boundary` is the whole run's precomputed `decision_boundary`.
+/// `dry_run` short-circuits every branch that would otherwise mutate the
+/// filesystem, the decision file, or prompt, printing what would happen
+/// instead.
 #[allow(clippy::too_many_arguments)]
 fn resolve_candidate(
     candidate: &Path,
@@ -822,15 +586,9 @@ fn resolve_candidate(
             });
             return Ok(());
         }
-        // Manually converted (or converted by a prior run before this
-        // candidate had a decision) - there's nothing left to
-        // *convert*, only a decision to record, so this is treated as
-        // its own undecided candidate: same TTY/no-TTY split as any
-        // other one, but the "yes" path never calls `materialize` -
-        // the desired end state already holds (and would be actively
-        // wrong to try: `copy_and_swap`'s final `remove_dir_all` can't
-        // remove a real subvolume, that needs `BTRFS_IOC_SNAP_DESTROY`,
-        // not a plain `rmdir()`).
+        // Already a subvolume: only a decision to record, so the "yes"
+        // path here must never call `materialize` — `copy_and_swap`'s
+        // `remove_dir_all` cannot remove a real subvolume.
         if !mode.decide {
             trace(Verbosity::Debug, || {
                 format!(
@@ -875,11 +633,6 @@ fn resolve_candidate(
         return Ok(());
     }
 
-    // Every candidate is either an explicit `--create` target or
-    // discovered by the walk (which only ever finds watched-name
-    // matches) - `project_path` itself is never a candidate at all
-    // (see the module doc comment), so there's no more "is this the
-    // literal <path> argument" check needed the way there used to be.
     let is_explicit = create.iter().any(|c| c == candidate);
 
     match existing_decision {
@@ -964,11 +717,8 @@ fn resolve_candidate(
     }
 }
 
-/// `true` only for an explicit "y"/"yes" — every other answer,
-/// including an empty one, is a decline. The shared shape for every
-/// *default-no* confirmation in `ensure_project_registered` below
-/// (nesting, orphaned ancestor) — unlike the plain registration ask,
-/// where an empty answer means yes.
+/// `true` only for an explicit "y"/"yes"; an empty answer is a decline.
+/// Used for the default-no confirmations in `ensure_project_registered`.
 fn read_yes_no(read_line: &mut impl FnMut() -> Option<String>) -> bool {
     match read_line() {
         Some(line) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
@@ -976,17 +726,10 @@ fn read_yes_no(read_line: &mut impl FnMut() -> Option<String>) -> bool {
     }
 }
 
-/// Walks up from `path`'s own parent looking for a decision file some
-/// human may have already authored for a broader ancestor project — a
-/// signal, when `path` isn't covered by any registered project, that
-/// its *actual* intended project boundary might be that ancestor
-/// (forgotten, or not yet registered), not `path` itself.
-/// `ensure_project_registered` uses this to warn rather than silently
-/// registering `path` as its own, narrower project. Bounded by `limit`
-/// (`path`'s own volume, or `None` to walk all the way to the
-/// filesystem root) — nothing past the volume boundary is even
-/// BTRFS-managed territory, so a decision file there wouldn't be
-/// actionable anyway.
+/// Walks up from `path`'s parent looking for a decision file authored
+/// for a broader ancestor project — a sign the real project boundary
+/// may have been forgotten. Bounded by `limit` (`path`'s own volume, or
+/// `None` for the filesystem root).
 fn nearest_ancestor_decision_file(path: &Path, limit: Option<&Path>) -> Option<PathBuf> {
     for ancestor in path.ancestors().skip(1) {
         if ancestor.join(filenames::DECISION_FILE_NAME).is_file() {
@@ -999,59 +742,12 @@ fn nearest_ancestor_decision_file(path: &Path, limit: Option<&Path>) -> Option<P
     None
 }
 
-/// Ensures `path` (a project argument to `convert`/`decide`) is covered
-/// by exactly one registered project before anything else happens —
-/// explicit and upfront, never a side effect of some candidate's
-/// decision getting recorded. **Nested project registration is never
-/// allowed** (`ai-work/tasks/nested-project-boundaries.plan.md`): at
-/// most one registered project can ever cover a given path, since
-/// decision/ignore files already self-distribute via their own
-/// closest-file-wins walk-up — a hierarchy of registered projects was
-/// never providing anything beyond a single, correct stopping boundary.
-///
-/// Four outcomes, checked in order:
-/// 1. `path` already covered (ancestor-or-self, and on the *same
-///    volume* — see `same_volume`; a path-ancestor on a different,
-///    more specific BTRFS root doesn't count) by a registered project
-///    → no-op, that project's decisions already apply to `path`.
-/// 2. Not covered, but registering `path` would nest *over* an
-///    already-registered, same-volume descendant project → the one
-///    case that can't just be asked "register?", since doing so would
-///    silently orphan the descendant's own decisions the moment a
-///    shallower project takes precedence (`decision_boundary` always
-///    prefers whichever covering project is more specific). Warns,
-///    lists the conflicting project(s), and asks whether to unregister
-///    them and register `path` as the new parent instead (default
-///    **no** — a real structural change, not a reversible-by-default
-///    action like plain registration below).
-/// 3. Not covered, no nesting conflict, but a decision file exists at
-///    some ancestor of `path` (up to `path`'s own volume boundary, see
-///    `nearest_ancestor_decision_file`) with nothing registered
-///    covering it — a parent registration may have been forgotten.
-///    Warns and asks whether to continue and register `path` as its
-///    own project anyway (default **no**).
-/// 4. Otherwise: today's plain "Register `path` as a project? [Y/n]"
-///    (default *yes* on an empty interactive answer — registering here
-///    is low-stakes and easily reversed via `projects unregister`,
-///    unlike every default-no ask above, which gates a real structural
-///    decision).
-///
-/// A missing TTY at any of the above still can't be presumed into a
-/// "yes": there's no human there at all, so every branch aborts rather
-/// than guessing. Declining (explicitly, or via no TTY) aborts the
-/// whole command in every branch — registration is a hard prerequisite
-/// now, not a soft preference.
-///
-/// `dry_run` (Phase 3, `ai-work/tasks/convert-project-model.plan.md`)
-/// short-circuits right after the coverage check (branch 1) — a dry
-/// run never asks, never mutates `project_roots`/disk, and never
-/// aborts for an uncovered path; it just reports that a real run would
-/// need to register `path` first. This also means `decision_boundary`
-/// (computed by the caller right after this returns) correctly falls
-/// back to `path` itself for the rest of the preview — the exact
-/// boundary a real, confirmed registration would produce in every one
-/// of branches 2-4 above, since a confirmed registration always ends
-/// with `path` itself as the sole covering project.
+/// Ensures `path` is covered by exactly one registered project (nested
+/// registration is disallowed). In order: (1) already covered -> no-op.
+/// (2) would nest over a registered descendant -> ask to unregister it
+/// first (default no). (3) an ancestor has an orphaned decision file ->
+/// ask to register anyway (default no). (4) otherwise, plain register
+/// ask (default yes). No TTY aborts; `dry_run` short-circuits after (1).
 fn ensure_project_registered(
     path: &Path,
     project_roots: &mut Vec<String>,
@@ -1221,10 +917,7 @@ fn ensure_project_registered(
 }
 
 /// Real entry point: real TTY/stdin. See `convert_with_io` for the
-/// testable core — now that the ask-then-convert gate decides whether
-/// a candidate is touched at all (not just whether the decision gets
-/// persisted), it needs the same injectable-stdin treatment as
-/// `reload_with_validator`/`unregister_with_io` elsewhere in this crate.
+/// testable core.
 #[allow(clippy::too_many_arguments)]
 pub fn convert(
     path: &Path,
@@ -1282,17 +975,10 @@ fn convert_with_io(
         read_line,
     )?;
 
-    // Computed once for the whole run, not per-candidate (see
-    // `decision_boundary`'s own doc comment) - `ensure_project_registered`
-    // has already guaranteed `path` is covered by exactly one registered
-    // project by this point (or, in a dry run, would be by a real run -
-    // see its own doc comment for why the fallback below still matches).
+    // Computed once for the whole run, not per-candidate.
     let boundary = decision_boundary(&rows, &project_roots, path);
 
-    // A `BTreeSet` dedupes across all three sources (`--create`, the
-    // walk, and any anchored decision-file pattern with no matching
-    // watched-name/existing-target) before the final shallowest-first
-    // ordering below.
+    // Dedupes across all three candidate sources before sorting below.
     let mut candidates: std::collections::BTreeSet<PathBuf> = create.iter().cloned().collect();
     if path.is_dir() {
         candidates.extend(find_nested_candidates(
@@ -1326,34 +1012,14 @@ fn convert_with_io(
 }
 
 /// `ghostvolumes decide <path> [--max-depth N] --add <pattern> --deny
-/// <pattern>` (Phase 4, `ai-work/tasks/convert-project-model.plan.md`,
-/// revised per `ai-work/tasks/decide-walk-and-markers.plan.md`): same
-/// walk-and-resolve engine as `convert` (same upfront registration,
-/// same boundary resolution, same `find_nested_candidates` walk, same
-/// per-candidate decision resolution and prompting) — the only
-/// difference is the mode (`Mode::DECIDE`): an existing `+` is a no-op
-/// instead of a re-materialize, and a freshly-answered "yes" only
-/// records the decision, never touches the filesystem. No `--create`,
-/// unlike `convert` — naming something explicitly to *materialize*
-/// conflicts with `decide`'s whole contract.
+/// <pattern>`: same walk-and-resolve engine as `convert`, but `Mode::DECIDE`
+/// means an existing `+` is a no-op and "yes" only records a decision,
+/// never touches the filesystem. No `--create`.
 ///
-/// Two things happen, in order:
-/// 1. Each `--add`/`--deny` pattern is recorded verbatim (no anchoring
-///    or broadening computed, since the human is directly specifying
-///    the pattern) — the original Phase 4 "hand-author ahead of time"
-///    behavior. Each pattern also doubles as `record_decision`'s own
-///    search key for an existing pending `?` marker with that *exact*
-///    pattern — an exact-string coincidence, not a re-derivation, but
-///    it means hand-typing the same pattern a prior undecided
-///    candidate left behind toggles that line in place.
-/// 2. Candidates are gathered exactly like `convert`'s own (the
-///    filesystem walk, plus `decision_file_anchored_candidates` —
-///    anything an anchored `+`/`?` pattern implies that the walk alone
-///    could never discover, most commonly because its target doesn't
-///    exist on disk yet) and resolved the same way: anything step 1
-///    already covers resolves via ordinary `decision::resolve`, no
-///    separate filter needed; anything still undecided gets asked
-///    about (or left pending, non-interactively).
+/// First, each `--add`/`--deny` pattern is recorded verbatim (also
+/// doubling as the search key for any existing pending `?` marker with
+/// that exact pattern, so hand-typing it toggles that line in place).
+/// Then candidates are gathered and resolved exactly like `convert`.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
     path: &Path,
@@ -1429,9 +1095,7 @@ fn decide_with_io(
         });
     }
 
-    // 1. Hand-authored patterns, verbatim, first - anything the walk
-    // or marker-scan below encounters that matches resolves via
-    // ordinary decision resolution with no separate logic needed.
+    // 1. Hand-authored patterns, verbatim, first.
     for pattern in add {
         record_decision(data_dir, &boundary, pattern, pattern, "+")?;
         println!("recorded: + {pattern} (at {})", boundary.display());
@@ -1441,11 +1105,8 @@ fn decide_with_io(
         println!("recorded: - {pattern} (at {})", boundary.display());
     }
 
-    // 2. Walk the filesystem exactly like convert, plus anything
-    // implied by an anchored decision-file pattern the walk couldn't
-    // discover on its own (its target doesn't exist on disk yet, or
-    // it doesn't match any watched name at all) - same source, same
-    // dedup, as `convert`'s own candidate gathering.
+    // 2. Walk the filesystem exactly like convert, plus anything implied
+    // by an anchored decision-file pattern the walk couldn't discover.
     let mut candidates: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     if path.is_dir() {
         candidates.extend(find_nested_candidates(
@@ -1496,10 +1157,8 @@ mod tests {
         std::fs::write(roots_path(dir), format!("{}\n", project.display())).unwrap();
     }
 
-    /// A `roots.d`-less config dir - `merge::load_all` treats a missing
-    /// `roots.d` subdirectory as an empty config, so tests that don't
-    /// care about `default-ignore` can point at this without creating
-    /// anything on disk.
+    /// A `roots.d`-less config dir, for tests that don't care about
+    /// `default-ignore`.
     fn config_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("config")
     }
@@ -1642,11 +1301,8 @@ mod tests {
 
     #[test]
     fn decision_boundary_merges_all_the_way_to_the_shallowest_of_a_nested_chain() {
-        // The core nested-chain fix: every level from /a/b down is a
-        // registered project, on the same (empty-rows) volume - the
-        // boundary must be the *shallowest* (/a/b), not the deepest,
-        // so resolve()'s own walk-up checks every level's decision file
-        // instead of stopping at the first (deepest) one it finds.
+        // Boundary must be the shallowest registered project (/a/b), not
+        // the deepest, in a same-volume nested chain.
         let project_roots = [
             "/a/b/c/d/e/f/g".to_string(),
             "/a/b/c/d/e".to_string(),
@@ -1796,10 +1452,7 @@ mod tests {
     fn ensure_project_registered_is_a_no_op_when_covered_by_a_shallower_same_volume_ancestor() {
         let cache_dir = empty_cache();
         let mut project_roots = vec!["/home/user".to_string()];
-        // Would panic if it asked at all - a shallower registered
-        // project already covers this exact nested path (the bug fixed
-        // alongside `decision_boundary`: exact-match-only used to miss
-        // this).
+        // Would panic if it asked at all - already covered, no-op expected.
         ensure_project_registered(
             Path::new("/home/user/monorepo/packages/foo"),
             &mut project_roots,
@@ -2028,10 +1681,7 @@ mod tests {
         std::fs::write(target.join("top-level.txt"), b"hello").unwrap();
         let cache_dir = empty_cache();
         register_project(&cache_dir, scratch.path());
-        // A pre-recorded `+` decision converts directly without asking
-        // (see a_plus_decision_converts_directly_without_asking) - the
-        // ask-then-convert gate for an *undecided* candidate would
-        // otherwise default to "no" on this non-TTY test harness.
+        // A pre-recorded `+` decision converts directly without asking.
         std::fs::write(
             scratch.path().join(filenames::DECISION_FILE_NAME),
             "+ node_modules\n",
@@ -2151,10 +1801,8 @@ mod tests {
 
     #[test]
     fn convert_proactively_creates_a_missing_anchored_plus_decision_for_an_unwatched_name() {
-        // The bug this guards against: an anchored `+` decision for a
-        // name that isn't even a watched name (so the walk could never
-        // discover it on its own) must still get created, with no
-        // --create needed - it's the persisted equivalent of one.
+        // An anchored `+` decision for an unwatched name must still get
+        // created, with no --create needed.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("venv2");
         let cache_dir = empty_cache();
@@ -2266,11 +1914,7 @@ mod tests {
     #[test]
     fn create_empty_tolerates_a_target_that_already_exists() {
         // Simulates the shim winning a race and creating the subvolume
-        // just before convert's own materialize() call took the lock
-        // (ai-work/tasks/atomic-file-io.plan.md §7) - create_empty
-        // itself (unlike resolve_candidate's own upfront is_subvolume
-        // check) must tolerate this rather than erroring, since the
-        // desired end state already holds.
+        // first; create_empty must tolerate this, not error.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         btrfs::create_subvolume(scratch.path(), "node_modules").unwrap();
@@ -2607,10 +2251,8 @@ mod tests {
         let cache_dir = empty_cache();
         register_project(&cache_dir, scratch.path());
 
-        // Not a TTY in the test harness, so if this fell through to
-        // asking it would answer "no" and record nothing - the
-        // assertion below (subvolume created, decision file unchanged)
-        // distinguishes "converted via the existing +" from "asked".
+        // Non-TTY: verifies conversion happened via the existing `+`,
+        // not by falling through to asking.
         convert(
             scratch.path(),
             std::slice::from_ref(&target),
@@ -2632,11 +2274,8 @@ mod tests {
 
     #[test]
     fn an_undecided_matching_candidate_converts_and_records_when_confirmed() {
-        // The reordered ask-then-convert gate (§6 addendum): asking
-        // happens *before* any filesystem change, and answering "yes"
-        // both converts and records - the same one-answer-does-both
-        // shape as before, just no longer already-converted by the
-        // time the question is asked.
+        // Asking happens before any filesystem change; "yes" both
+        // converts and records.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         std::fs::create_dir_all(&target).unwrap();
@@ -2670,12 +2309,8 @@ mod tests {
 
     #[test]
     fn an_undecided_matching_candidate_is_left_alone_when_declined() {
-        // Confirms the gate is a real approve/deny before any action,
-        // not just a "remember for next time" afterthought: declining
-        // must leave existing content completely untouched - and,
-        // unlike the old "no" (silently forgotten), an explicit decline
-        // at a real prompt is itself a deliberate decision worth
-        // recording, so it isn't asked again next time.
+        // Declining leaves existing content untouched but still records
+        // a `-`, so it isn't asked again next time.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         std::fs::create_dir_all(&target).unwrap();
@@ -2711,13 +2346,8 @@ mod tests {
 
     #[test]
     fn a_matching_candidate_is_left_alone_without_a_tty_even_though_it_would_match() {
-        // convert converts nothing for any undecided candidate when run
-        // non-interactively (scripted, cron, CI) - naming it via
-        // --create isn't enough on its own without someone there to
-        // answer. It still leaves a trail, though: a pending "? <pattern>"
-        // marker, the same mechanism the shim itself uses for an
-        // undecided candidate it can't ask about either - so nothing
-        // seen this run is silently forgotten.
+        // Non-interactive: converts nothing but leaves a pending
+        // "? <pattern>" marker.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         std::fs::create_dir_all(&target).unwrap();
@@ -2773,11 +2403,8 @@ mod tests {
 
     #[test]
     fn a_later_yes_toggles_an_existing_pending_marker_in_place() {
-        // The bug this guards against: a candidate first seen
-        // non-interactively (leaving "? /node_modules") must not end up
-        // with *both* that pending marker and a real decision once one
-        // is later recorded - the marker should become the decision,
-        // same line, same position.
+        // A pending marker becomes the real decision in place, not a
+        // second, separate line.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         std::fs::create_dir_all(&target).unwrap();
@@ -2848,10 +2475,8 @@ mod tests {
 
     #[test]
     fn a_later_all_matches_answer_lands_the_broader_pattern_in_the_marker_s_own_spot() {
-        // "a" records a *different*, broader pattern than the anchored
-        // pending marker - still an in-place swap, not a remove-then-
-        // append-at-the-end: surrounding lines (including human
-        // comments) keep their exact position and order.
+        // "a" records a broader pattern than the marker, still swapped
+        // in place rather than appended at the end.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         std::fs::create_dir_all(&target).unwrap();
@@ -2895,10 +2520,8 @@ mod tests {
         let cache_dir = empty_cache();
         register_project(&cache_dir, &project);
 
-        // Convert is pointed at the *project* directory, not `vendor`
-        // itself directly - vendor is only found via the recursive
-        // walk, so the `-` decision is respected with no override
-        // prompt at all.
+        // vendor is found via the recursive walk, so its `-` decision
+        // is respected with no override prompt.
         write_cache_rows(&cache_path(&cache_dir), &[(&project, "vendor")]);
         convert(
             &project,
@@ -2979,12 +2602,8 @@ mod tests {
 
     #[test]
     fn a_populated_project_argument_is_never_a_candidate_but_nested_matches_still_convert() {
-        // The bug this guards against: pointing `convert` at an
-        // already-populated project (e.g. to bootstrap decisions for
-        // what's inside it) must not fold the whole project itself into
-        // a subvolume - `project` is never added to `candidates` at all
-        // now (see the module doc comment), regardless of its own name
-        // or content, unlike the nested "node_modules" match.
+        // `project` itself is never added to `candidates`, unlike the
+        // nested "node_modules" match.
         let scratch = btrfs_scratch_dir();
         let project = scratch.path().join("project");
         let nested = project.join("packages/foo/node_modules");
@@ -3256,10 +2875,8 @@ mod tests {
 
     #[test]
     fn convert_merges_decisions_from_a_shallower_registered_parent_project() {
-        // End-to-end version of decision_boundary_merges_all_the_way_to_the_shallowest_of_a_nested_chain:
-        // both /a/b (outer) and /a/b/c (inner, the actual convert
-        // argument) are registered projects on the same volume - only
-        // the outer one has a decision, and it must still govern.
+        // Only the outer (/a/b) of a same-volume nested chain has a
+        // decision; it must still govern the inner (/a/b/c) argument.
         let scratch = btrfs_scratch_dir();
         let outer = scratch.path().join("a/b");
         let inner = outer.join("c");
@@ -3271,10 +2888,7 @@ mod tests {
             format!("{}\n{}\n", outer.display(), inner.display()),
         )
         .unwrap();
-        // A single row at `outer` keeps both registered projects on the
-        // same volume - a row at `inner` instead would make `outer`
-        // volume-`None` and `inner` volume-`Some(inner)`, an unrelated
-        // false mismatch this test isn't trying to exercise.
+        // A single row at `outer` keeps both projects on the same volume.
         write_cache_rows(&cache_path(&cache_dir), &[(&outer, "node_modules")]);
         std::fs::write(
             outer.join(filenames::DECISION_FILE_NAME),
@@ -3299,10 +2913,8 @@ mod tests {
 
     #[test]
     fn convert_does_not_merge_decisions_across_a_volume_boundary_even_when_paths_nest() {
-        // The complementary case: a path-ancestor project on a
-        // *different* volume must not be treated as covering - the
-        // inner path gets its own, separate registration instead of
-        // silently inheriting (or being blocked by) the outer one.
+        // A path-ancestor project on a different volume must not count
+        // as covering; the inner path gets its own registration.
         let scratch = btrfs_scratch_dir();
         let outer = scratch.path().join("a");
         let inner = outer.join("b3/c1/d1");
@@ -3327,11 +2939,8 @@ mod tests {
         )
         .unwrap();
 
-        // First answer: the plain "register as a project?" ask (empty
-        // = yes) - `inner` isn't covered by `outer` (different
-        // volume), so this is a fresh registration, not a no-op.
-        // Second answer: "convert (and remember)?" for the discovered
-        // node_modules candidate itself.
+        // First answer: register as a project (empty = yes). Second:
+        // "convert (and remember)?" for the node_modules candidate.
         let mut answers = vec![String::new(), "y".to_string()].into_iter();
         convert_with_io(
             &inner,
@@ -3404,10 +3013,8 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         let cache_dir = empty_cache();
         register_project(&cache_dir, &project);
-        // The row's own prefix - the configured *volume* root - is the
-        // broader `scratch` dir, not `project` itself, so its own
-        // `.ghostvolumes-ignore` lives there too, distinct from the
-        // project root.
+        // The volume root is the broader `scratch` dir, not `project`,
+        // so its `.ghostvolumes-ignore` lives there instead.
         write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "vendor")]);
         std::fs::write(scratch.path().join(filenames::IGNORE_FILE_NAME), "vendor\n").unwrap();
 
@@ -3644,11 +3251,8 @@ mod tests {
 
     #[test]
     fn decide_writes_to_a_shallower_already_registered_covering_project_not_the_argument_itself() {
-        // Same-volume nested-project reasoning as
-        // convert_merges_decisions_from_a_shallower_registered_parent_project:
-        // both /a/b (outer) and /a/b/c (inner, the decide argument) are
-        // registered on the same volume - the decision must land in the
-        // outer project's own file, not create a new one at the inner path.
+        // Same nested-project reasoning as convert's own equivalent
+        // test: the decision must land in outer's file, not inner's.
         let scratch = btrfs_scratch_dir();
         let outer = scratch.path().join("a/b");
         let inner = outer.join("c");
@@ -3837,10 +3441,7 @@ mod tests {
 
     #[test]
     fn materialize_blocks_while_the_boundary_lock_is_held_then_succeeds() {
-        // The CLI-side half of the shim-vs-convert directory-swap lock
-        // (ai-work/tasks/atomic-file-io.plan.md §6): unlike the shim's
-        // own non-blocking try_lock, materialize blocks - fine here,
-        // since convert is an explicit, occasional, human-run command.
+        // Unlike the shim's non-blocking try_lock, materialize blocks.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         let cache_dir = empty_cache();

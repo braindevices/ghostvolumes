@@ -1,22 +1,10 @@
-//! `ghostvolumes projects list/register/unregister`
-//! (ai-work/tasks/decision-model.plan.md §3,
-//! ai-work/tasks/atomic-file-io.plan.md §5): manages the project-roots
-//! list — the plain-text file giving the decision-file walk-up a
-//! narrower stopping boundary than the broader `roots.d` entries alone.
-//! No TOML, no `reload` involvement — just a flat list, appended to by
-//! `register`/`convert`'s own side-effect registration, and rewritten
-//! wholesale by `unregister`. CLI-only (unlike `project_roots_core.rs`,
-//! which both the CLI and the shim read) — the shim never writes this
-//! file, only these deliberate CLI paths.
+//! `ghostvolumes projects list/register/unregister`: manages the
+//! project-roots list, a flat text file giving the decision-file walk-up
+//! a narrower stopping boundary. CLI-only; the shim never writes it.
 //!
-//! Every mutation — `register`'s append, `unregister`'s rewrite — holds
-//! `project-roots.lock` for its whole read-modify-write sequence
-//! (ai-work/tasks/atomic-file-io.plan.md §5): `register`'s single
-//! `write_all()` append is already safe against *other appends*, but
-//! not against being invisibly overwritten by a concurrent
-//! `unregister` rewrite that read a stale snapshot before this append
-//! landed - the lock closes that lost-update race, not just byte-level
-//! corruption.
+//! Every mutation holds `project-roots.lock` for its whole
+//! read-modify-write sequence, so a concurrent `unregister` rewrite can
+//! never silently drop a `register` append (or vice versa).
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -37,12 +25,8 @@ fn lock_project_roots(list_path: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
-    // Normalized once here (not just at `needs_append`'s comparison) so
-    // the on-disk file itself never gains a new trailing-slash entry
-    // going forward, not just a normalized-on-read view of an old one -
-    // `path` is a raw, unvalidated CLI arg (`ProjectsAction::Register`),
-    // and shell tab-completion routinely appends a trailing slash for a
-    // directory.
+    // Normalized before writing so the file never gains a new
+    // trailing-slash entry (shell tab-completion often appends one).
     let path = crate::project_roots::normalize_root_path(path);
 
     let _lock = lock_project_roots(list_path)?;
@@ -58,12 +42,8 @@ pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
         .create(true)
         .append(true)
         .open(list_path)?;
-    // One write_all call for the whole line, not writeln! - writeln!'s
-    // multi-piece format string is multiple write() syscalls, and
-    // O_APPEND only guarantees each *individual* write() is atomically
-    // appended, not the whole logical line (ai-work/tasks/atomic-file-io.plan.md
-    // §3). A concurrent second appender's line could otherwise land
-    // between this line's content and its own trailing newline.
+    // Single write_all for the whole line (not writeln!): O_APPEND only
+    // guarantees one write() call lands atomically, not multiple.
     file.write_all(format!("{path}\n").as_bytes())?;
     Ok(())
 }
@@ -79,15 +59,9 @@ pub fn unregister(list_path: &Path, path: Option<&str>) -> anyhow::Result<()> {
     )
 }
 
-/// `Some(path)`: removes that exact entry, no prompt - an explicit,
-/// deliberate single-path removal. `None` (auto mode): scans every
-/// entry, and for each one where `Path::is_dir()` is now false, asks
-/// before removing it - handles both locally-deleted projects and
-/// entries that arrived already-stale via a copied-in/synced
-/// `project-roots.list` (ai-work/tasks/atomic-file-io.plan.md §4).
-/// Same TTY/injectable posture as `convert.rs`'s `ask_remember`/
-/// `confirm_override` - defaults to *not* removing on a non-TTY or
-/// empty answer.
+/// `Some(path)` removes that exact entry, no prompt. `None` (auto mode)
+/// scans every entry and asks before removing any that's no longer a
+/// directory; defaults to *not* removing on a non-TTY or empty answer.
 fn unregister_with_io(
     list_path: &Path,
     path: Option<&str>,
@@ -97,12 +71,8 @@ fn unregister_with_io(
     let _lock = lock_project_roots(list_path)?;
 
     let existing = std::fs::read_to_string(list_path).unwrap_or_default();
-    // Reading back through `parse` (not raw `.lines()`) means every
-    // entry is already slash-normalized before comparison - an
-    // explicit `path` typed with (or without) a trailing slash still
-    // matches a stored entry that differs only in that. As a side
-    // effect, this rewrite also normalizes every *other* entry already
-    // in the file, regardless of which one was targeted.
+    // `parse` slash-normalizes every entry, so an explicit `path` still
+    // matches regardless of a trailing slash on either side.
     let entries = crate::project_roots::parse(&existing);
 
     let to_keep: Vec<String> = match path {
@@ -165,10 +135,8 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    /// A fresh project-roots list path under a new tempdir - bundled
-    /// with the `TempDir` guard (which must stay alive for `list_path`
-    /// to remain valid) so callers don't each repeat `tempdir()` +
-    /// `.join(filenames::PROJECT_ROOTS_FILE_NAME)`.
+    /// A fresh project-roots list path under a new tempdir, bundled with
+    /// its `TempDir` guard (must stay alive for `list_path` to be valid).
     fn temp_list_path() -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().unwrap();
         let list_path = dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME);
@@ -260,13 +228,8 @@ mod tests {
 
     #[test]
     fn concurrent_registers_never_interleave_or_split_a_line() {
-        // Regression guard for the writeln!-is-multiple-syscalls bug:
-        // with the old code, a concurrent appender's write could land
-        // between this line's content and its own trailing newline,
-        // merging or splitting lines. With a single write_all per
-        // line (and now project-roots.lock serializing every append),
-        // every one of these concurrent appends must land as a
-        // complete, untouched line - never merged, never split.
+        // Every concurrent append must land as a complete, untouched
+        // line - never merged or split with another.
         let (_dir, list_path) = temp_list_path();
         let paths: Vec<String> = (0..8).map(|i| format!("/project-{i}")).collect();
 
@@ -363,12 +326,8 @@ mod tests {
 
     #[test]
     fn a_register_between_unregisters_read_and_write_is_not_lost() {
-        // Closes the lost-update race project-roots.lock exists for:
-        // hold the lock ourselves first (simulating a register() that
-        // has already read a fresh snapshot and is about to append),
-        // spawn unregister in another thread (it must block on the
-        // lock rather than reading a stale snapshot), then append and
-        // release - unregister's eventual read must see this append.
+        // Hold the lock, spawn unregister (must block on it), then
+        // append and release - unregister's read must see this append.
         let (dir, list_path) = temp_list_path();
         register(&list_path, "/existing").unwrap();
 

@@ -1,12 +1,8 @@
 // XDG base directory resolution (§2): `~/.config/ghostvolumes` and
-// `~/.local/share/ghostvolumes` by default, honoring
-// `XDG_CONFIG_HOME`/`XDG_DATA_HOME` overrides. Pure logic - takes
-// `home`/override as plain arguments rather than reading the
-// environment itself, so it's shareable as-is between the main crate
-// (`src/xdg.rs`, via `include!`) and the shim (`shim/preload.rs`, via
-// `mod`) - the shim MUST resolve `compiled.tsv`'s path exactly the way
-// `reload`/`init` do, or a user with `XDG_DATA_HOME` set would have a
-// shim silently reading from the wrong (or no) file.
+// `~/.local/share/ghostvolumes` by default, honoring `XDG_CONFIG_HOME`/
+// `XDG_DATA_HOME`. Shared between CLI and shim — the shim MUST resolve
+// `compiled.tsv`'s path exactly like `reload`/`init` do, or risk
+// silently reading the wrong (or no) file.
 
 pub fn config_dir_from(home: &str, xdg_config_home: Option<&str>) -> std::path::PathBuf {
     match xdg_config_home {

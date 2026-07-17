@@ -1,32 +1,19 @@
-//! `ghostvolumes intercept -- <cmd>` (ai-work/tasks/decision-model.plan.md
-//! §5): the one entry point that sets `LD_PRELOAD` for a child process
-//! only — no shell-rc setup required, works standalone. Sets the env
-//! var on the *child's* environment only (`std::process::Command::env`
-//! never touches this process's own environment), execs with stdio
-//! fully inherited (`Command`'s default), and waits — completely normal
-//! passthrough while `<cmd>` runs, no redirection, no flags, no
-//! prompting of any kind (§5's "the shim can never be the one
-//! prompting" applies here too: `intercept` itself doesn't prompt
-//! either, only reports after the fact).
+//! `ghostvolumes intercept -- <cmd>`: sets `LD_PRELOAD` on the child
+//! process only, execs with stdio fully inherited, and waits - a plain
+//! passthrough, no prompting.
 //!
-//! After `<cmd>` exits (full foreground control back, no longer racing
-//! with anything), checks whether any decision file at a *possible*
-//! project-root boundary (every distinct `compiled.tsv` row prefix and
-//! registered project-roots entry — the exhaustive set of locations
-//! `walkup_boundary` could ever resolve to) changed during the run, and
-//! if so, prints one notice per changed root naming the single
-//! covering `ghostvolumes convert <project-root>` command, rather than
-//! one line per individual pending path.
+//! After `<cmd>` exits, checks whether any decision file at a possible
+//! project-root boundary changed during the run, and if so prints one
+//! notice per changed root naming the covering `convert` command.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::filenames;
 
-/// Every location a decision file could possibly live at the *root* of
-/// a project (§3's `walkup_boundary`): the union of `compiled.tsv`'s
-/// row prefixes and the registered project-roots list. Deduplicated
-/// and sorted for a deterministic snapshot/diff order.
+/// Every possible project-root boundary: the union of `compiled.tsv`'s
+/// row prefixes and the registered project-roots list, deduplicated and
+/// sorted for a deterministic snapshot/diff order.
 fn candidate_boundaries(rows: &[(String, String)], project_roots: &[String]) -> Vec<PathBuf> {
     let mut set: BTreeSet<String> = BTreeSet::new();
     for (prefix, _) in rows {
@@ -38,10 +25,9 @@ fn candidate_boundaries(rows: &[(String, String)], project_roots: &[String]) -> 
     set.into_iter().map(PathBuf::from).collect()
 }
 
-/// Each boundary's decision file text right now (`None` if it doesn't
-/// exist) - compared before/after `<cmd>` runs. Full-text comparison
-/// rather than mtime: these are small files and mtime resolution on
-/// some filesystems is coarse enough to miss a sub-second run.
+/// Each boundary's decision file text right now (`None` if absent),
+/// compared before/after `<cmd>` runs. Full-text, not mtime, since
+/// mtime resolution can be too coarse to catch a sub-second run.
 fn snapshot(boundaries: &[PathBuf]) -> Vec<Option<String>> {
     boundaries
         .iter()

@@ -1,18 +1,14 @@
-//! `ghostvolumes init` (§8.1): extracts the build-time-compiled shim
-//! bytes to disk, writes default config skeletons. Does no compilation
-//! at all — `rustc` only ever runs once, in `build.rs`, at `cargo
-//! install` build time.
+//! `ghostvolumes init`: extracts the build-time-compiled shim bytes to
+//! disk, writes default config skeletons. Does no compilation itself —
+//! `rustc` only runs once, in `build.rs`, at `cargo install` time.
 
 use std::path::Path;
 
 use crate::filenames;
 
-// `env!("GHOSTVOLUMES_SHIM_FILE_NAME")` - not `filenames::SHIM_FILE_NAME`
-// - since `concat!` only accepts literal tokens (which `env!` expands
-// to at this same compile time), not a `const` reference. Both this
-// and `filenames::SHIM_FILE_NAME` read the same `build.rs`-defined
-// value, so they can't drift apart even though neither references the
-// other directly.
+// Uses `env!(...)` directly, not `filenames::SHIM_FILE_NAME`, since
+// `concat!` only accepts literal tokens, not a `const` reference. Both
+// read the same `build.rs`-defined value, so they can't drift apart.
 const PRELOAD_SO: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/",

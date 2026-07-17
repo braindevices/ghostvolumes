@@ -1,36 +1,19 @@
-//! Loads and layers `roots.d/*.toml` (§2, `ai-work/tasks/root-watch-config.plan.md`):
-//! files are read in sorted order and merged with a single rule —
-//! **last file wins per field** — for both the top-level
-//! `default-watches` and each root path's own `enabled`/`watches`. A
-//! root untouched by a later file keeps whatever an earlier file set for
-//! the fields that file *did* mention; a root disabled by any file
-//! (regardless of load order relative to where it was first defined) is
-//! dropped from the result entirely, with no cascade to any other root
-//! nested under its path (each root path is an independent entry, see
-//! the plan doc). `watched.d` and `projects.d` (per-project config) were
-//! both removed — decision files are the entire per-project mechanism
-//! now.
-//!
-//! `default-ignore` (Phase 2, `ai-work/tasks/convert-project-model.plan.md`)
-//! merges the same last-file-wins way as `default-watches`, but stays
-//! global-only — there's no per-root `["/path"] ignore = [...]`
-//! override the way `watches` has. Per-root/per-project ignore patterns
-//! are deliberately decentralized instead, into a `.ghostvolumes-ignore`
-//! file living directly at that one root or project boundary (not
-//! merged across files, not walked up through every intermediate
-//! directory) — `convert`/`discover` read those files directly, not
-//! through this module.
+//! Loads and layers `roots.d/*.toml`: files are read in sorted order
+//! and merged with **last file wins per field**, for `default-watches`,
+//! `default-ignore`, and each root's own `enabled`/`watches`. A root
+//! disabled by any file is dropped entirely, with no cascade to other
+//! roots nested under its path. Per-root/per-project ignore patterns
+//! live in `.ghostvolumes-ignore` files instead, read directly by
+//! `convert`/`discover`, not merged here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::{config, filenames};
 
-/// One root path, fully resolved: `enabled = false` roots never reach
-/// this stage at all (filtered out below), and `watches` already
-/// reflects that root's own override if it had one, or `default-watches`
-/// otherwise — `cache::compile` needs nothing more than this to build
-/// `compiled.tsv`.
+/// One root path, fully resolved: `enabled = false` roots are filtered
+/// out before this stage, and `watches` already reflects its own
+/// override or `default-watches`.
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct ResolvedRoot {
     pub path: String,
@@ -47,12 +30,8 @@ pub struct MergedConfig {
 
 impl MergedConfig {
     /// Every watched name across every resolved root, deduped and
-    /// sorted — for callers that need a single flat name list
-    /// regardless of which root a given path falls under (`discover`'s
-    /// pre-adoption walk isn't root-scoped the way `cache::names_for`/
-    /// `compiled.tsv` are). Not a substitute for per-root scoping where
-    /// that matters — `cache::compile` still uses each root's own list
-    /// directly, never this.
+    /// sorted, for callers that don't need per-root scoping (e.g.
+    /// `discover`). `cache::compile` still uses each root's own list.
     pub fn all_watched_names(&self) -> Vec<String> {
         let mut set: BTreeSet<String> = BTreeSet::new();
         for root in &self.roots {

@@ -1,15 +1,10 @@
-//! `ghostvolumes scan` / `scan --save` (§3): unprivileged BTRFS
-//! snapshot-root detection. For each BTRFS mountpoint, a `.snapshots`
-//! child that is itself a subvolume (inode 256) is Snapper's
-//! structural fingerprint — present regardless of whether `.snapshots`
-//! has its own separate mount entry (openSUSE-style) or is just a
-//! nested, unmounted subvolume (Arch-style), since a plain `stat()`
-//! sees it either way.
+//! `ghostvolumes scan` / `scan --save`: unprivileged BTRFS snapshot-root
+//! detection. For each BTRFS mountpoint, a `.snapshots` child that is
+//! itself a subvolume is Snapper's structural fingerprint, detected via
+//! a plain `stat()` regardless of mount layout.
 //!
-//! The privileged pass (§3 point 2: `snapper list-configs`, Timeshift,
-//! btrbk config parsing, only run under `sudo`) is not implemented
-//! yet — out of scope for this step, which covers the always-run
-//! unprivileged pass and the `scan`/`scan --save` command shape.
+//! The privileged pass (`snapper list-configs`, Timeshift, btrbk config
+//! parsing under `sudo`) is not implemented yet.
 
 use std::path::Path;
 
@@ -45,10 +40,8 @@ pub fn detect_roots() -> anyhow::Result<Vec<String>> {
 }
 
 /// Renders and atomically writes `roots.d/00-auto.toml`. Never touches
-/// any other file under `config_dir` (§2). Writes bare root-path
-/// entries only — no `default-watches`, no per-root `enabled`/`watches`
-/// override, since `scan` only ever knows *which* paths are BTRFS
-/// roots, not how they should be watched; that's `10-local.toml`'s job.
+/// any other file under `config_dir`. Writes bare root-path entries
+/// only, since `scan` doesn't know how they should be watched.
 pub fn save_roots(config_dir: &Path, roots: &[String]) -> anyhow::Result<()> {
     let file = RootsFile {
         default_watches: None,

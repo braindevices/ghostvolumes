@@ -1,29 +1,11 @@
-// Leveled verbosity (ai-work/tasks/leveled-verbosity.plan.md), shared
-// between the main CLI (via `include!`, from `src/debug.rs`) and the
-// LD_PRELOAD shim (via `mod`, from `shim/preload.rs`). Dependency-free
-// (plain `std` only) - same reasoning as `cache_core.rs`/
-// `decision_core.rs`: the shim is compiled standalone by bare `rustc`
-// and can't link crates.io crates (no `log`/`tracing`), so this is
-// hand-written rather than pulled in from an existing crate.
-//
-// Pure parsing/ordering only - no I/O, no sink concept. The two
-// binaries need genuinely different sinks (the CLI can write to
-// stderr or a file; the shim must *never* touch stdout/stderr under
-// any circumstances, since it runs injected into arbitrary host
-// processes - a hard safety invariant, not a preference), so sink
-// handling stays separate in each (`src/debug.rs`'s `Sink`,
-// `shim/preload.rs`'s existing `LogContext`) rather than being forced
-// into this shared file.
-//
-// Plain `//` comments, not `//!`/`///`: this file gets spliced
-// mid-file into src/debug.rs via `include!`.
+// Leveled verbosity, shared (via `include!`/`mod`) between the CLI and
+// the dependency-free LD_PRELOAD shim. Pure parsing/ordering, no I/O:
+// the shim must never touch stdout/stderr, so sink handling stays
+// separate in each binary.
 
-/// Ordered by declaration (`#[derive(Ord)]` gives this for free):
-/// `Error < Warn < Info < Debug < Trace` - a message at `level` is
-/// shown whenever `level <= configured_verbosity()`, so raising
-/// verbosity (moving right) shows strictly more, and lowering it
-/// (moving left, below the default `Info`) shows strictly less than
-/// today's normal mode used to.
+/// Ordered `Error < Warn < Info < Debug < Trace` - a message at `level`
+/// is shown whenever `level <= configured_verbosity()`, so raising
+/// verbosity shows strictly more than the default `Info`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verbosity {
     Error,
@@ -35,10 +17,8 @@ pub enum Verbosity {
 
 impl Verbosity {
     /// The upper-case tag used as a log line's message-type head (see
-    /// `format_line`) - `Debug`'s own `{:?}` would give the same
-    /// spelling already, but this is spelled out explicitly rather
-    /// than relying on the derive matching the derived-name
-    /// convention forever.
+    /// `format_line`), spelled out explicitly rather than relying on
+    /// `{:?}` matching this forever.
     pub fn as_str(self) -> &'static str {
         match self {
             Verbosity::Error => "ERROR",
@@ -50,12 +30,9 @@ impl Verbosity {
     }
 }
 
-/// Renders one log line's full head - an ISO 8601 UTC timestamp
-/// (millisecond precision), pid, and level - shared between the CLI
-/// and the shim so every sink (stderr or a file for the CLI, always a
-/// file for the shim) gets the same, consistent, greppable shape:
-/// `[<iso8601>] [pid <pid>] [<LEVEL>] <message>`. No trailing newline -
-/// each sink appends its own.
+/// Renders one log line's full head (ISO 8601 UTC timestamp, pid,
+/// level) in the shared, greppable shape:
+/// `[<iso8601>] [pid <pid>] [<LEVEL>] <message>`. No trailing newline.
 pub fn format_line(level: Verbosity, message: &str) -> String {
     format!(
         "[{}] [pid {}] [{}] {message}",
@@ -66,11 +43,8 @@ pub fn format_line(level: Verbosity, message: &str) -> String {
 }
 
 /// Renders `time` as `YYYY-MM-DDTHH:MM:SS.mmmZ` (ISO 8601, UTC,
-/// millisecond precision) - hand-rolled rather than pulling in
-/// `chrono`/`time`, since the shim can't link any crates.io crate at
-/// all. Takes the time explicitly (rather than calling
-/// `SystemTime::now()` itself) so it stays a pure, unit-testable
-/// function - `format_line` is the one caller that supplies "now."
+/// millisecond precision), hand-rolled since the shim can't link
+/// `chrono`/`time`. Takes `time` explicitly to stay pure/testable.
 fn iso8601_utc_millis(time: std::time::SystemTime) -> String {
     let since_epoch = time
         .duration_since(std::time::UNIX_EPOCH)
@@ -89,9 +63,8 @@ fn iso8601_utc_millis(time: std::time::SystemTime) -> String {
 
 /// Howard Hinnant's `civil_from_days` algorithm
 /// (<https://howardhinnant.github.io/date_algorithms.html>, public
-/// domain): days-since-1970-01-01 -> `(year, month, day)` in the
-/// proleptic Gregorian calendar. Correct for any `z`, including
-/// negative (pre-1970) values, not just "today."
+/// domain): days-since-1970-01-01 -> `(year, month, day)`, correct for
+/// any `z` including negative (pre-1970) values.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -106,9 +79,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Parses one of the five lowercase level names (case-insensitive).
-/// `None` for anything else, including empty - `configured_verbosity`
-/// is the one place that degrades an unparseable value to a default,
-/// keeping this function a pure, total parse.
+/// `None` for anything else, including empty; `configured_verbosity`
+/// is the one place that degrades an unparseable value to a default.
 pub fn parse_verbosity(value: &str) -> Option<Verbosity> {
     match value.trim().to_ascii_lowercase().as_str() {
         "error" => Some(Verbosity::Error),
@@ -121,11 +93,8 @@ pub fn parse_verbosity(value: &str) -> Option<Verbosity> {
 }
 
 /// `GHOSTVOLUMES_DEBUG`'s value, parsed - unset, empty, or unrecognized
-/// (including the old `"1"`/`"0"` on/off convention, which doesn't
-/// extend sensibly to an ordered scale that goes *below* the default:
-/// `error`/`warn` are non-empty and non-`"0"` too) all degrade to
-/// `Info`, the same never-panic, sane-default posture every other env
-/// var this project reads already has.
+/// (including the old `"1"`/`"0"` convention) all degrade to `Info`,
+/// the same never-panic, sane-default posture used elsewhere.
 pub fn configured_verbosity() -> Verbosity {
     std::env::var("GHOSTVOLUMES_DEBUG")
         .ok()

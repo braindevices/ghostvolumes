@@ -1,12 +1,7 @@
-// BTRFS ioctls, LD_PRELOAD, and /proc/self/mountinfo are all
-// Linux-specific (§8.3) - every module here depends on at least one of
-// them, so gate the whole implementation rather than have it fail to
-// compile confusingly on other platforms.
-// Not gated behind `target_os = "linux"` like the modules below -
-// `build_version_core.rs`'s logic is plain string/number parsing with
-// no OS dependency, and only exists here (rather than only in
-// `build.rs`) so its `#[cfg(test)]` unit tests actually run - see that
-// file's doc comment for why.
+// BTRFS ioctls, LD_PRELOAD, and /proc/self/mountinfo are Linux-specific;
+// gate the whole implementation rather than fail to compile confusingly
+// elsewhere. `build_version_core.rs` has no OS dependency and is
+// included here (not gated) so its `#[cfg(test)]` tests actually run.
 #[cfg(test)]
 mod build_version_check {
     include!("../build_version_core.rs");
@@ -63,28 +58,12 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use clap::{Parser, Subcommand};
 
-/// `CARGO_PKG_VERSION` alone (e.g. "0.3.2") doesn't say *which* commit
-/// was actually built - two installs both claiming "0.3.2" could be
-/// meaningfully different if the version wasn't bumped between them.
-/// `git describe`'s output (via `build.rs`'s `vergen-gitcl` call) adds
-/// that: exactly "v0.3.2" when built right at that tag, or
-/// "v0.3.2-3-gabc1234" three commits past it. Needs a tag to actually
-/// exist somewhere in history to be meaningful - with none at all,
-/// `git describe` falls back to the bare commit hash instead (see
-/// `CHANGELOG.md`'s 0.3.1 entry for this project's own tagging).
-///
-/// `GHOSTVOLUMES_VERSION` (also `build.rs`, its own
-/// `current_branch()`/`compute_version()`) is a full SemVer version for
-/// this project's GitFlow-shaped branches, not just `CARGO_PKG_VERSION`
-/// plus a suffix: `main`/`master`/detached HEAD use `CARGO_PKG_VERSION`
-/// unchanged, but `develop`/`feature/*` bump the *minor* version
-/// (`-alpha`/`-dev`) and `hotfix/*` bumps the *patch* version (`-rc`),
-/// off the latest git tag rather than off `Cargo.toml`. That bump is
-/// what keeps SemVer precedence correct after a release: a pre-release
-/// suffix left on the *same* base number as the release just tagged
-/// (e.g. "0.3.2-alpha" right after tagging v0.3.2) would sort *below*
-/// that release, making ongoing development look older than what's
-/// already shipped.
+/// `git describe` (via `build.rs`) pins down exactly which commit was
+/// built, since `CARGO_PKG_VERSION` alone can't. `GHOSTVOLUMES_VERSION`
+/// (also `build.rs`) is a full SemVer version off the latest git tag:
+/// `develop`/`feature/*` bump the minor version, `hotfix/*` bumps the
+/// patch version, so a pre-release suffix still sorts above the last
+/// tagged release rather than looking older than what's shipped.
 #[cfg(target_os = "linux")]
 const VERSION: &str = concat!(
     env!("GHOSTVOLUMES_VERSION"),
@@ -120,27 +99,22 @@ enum Command {
     /// Survey for undecided directories and suggest `decide` commands to run
     Discover {
         path: Option<String>,
-        /// How many directory levels deep to scan - defaults to a
-        /// bounded depth (unlike convert/decide's unlimited default)
-        /// since discover walks an arbitrary, unregistered path ($HOME
-        /// by default), not one already-scoped project
+        /// How many directory levels deep to scan (bounded by default,
+        /// unlike convert/decide, since `path` is an arbitrary,
+        /// unregistered starting point)
         #[arg(long, default_value_t = 3)]
         max_depth: u32,
-        /// Let a suggestion nested under `path` fold into it - without
-        /// this, `path` is assumed to be an arbitrary directory being
-        /// surveyed, not itself a project, so it never absorbs another
-        /// suggestion found underneath it
+        /// Let a suggestion nested under `path` fold into it, instead
+        /// of treating `path` as a non-project container
         #[arg(long)]
         root_is_project: bool,
-        /// A known-not-a-project container path (repeatable) - never
-        /// used as a merge target even if it has its own finding,
-        /// same as `path` itself unless --root-is-project is passed
+        /// A known-not-a-project container path (repeatable); never a
+        /// merge target, same as `path` unless --root-is-project is set
         #[arg(long = "no-project")]
         no_project: Vec<String>,
         /// A path (repeatable) to never scan at all - no report, no
-        /// descent - for a known-noisy directory you don't want
-        /// walked, unlike --no-project which still reports its own
-        /// finding, just never merges into it
+        /// descent - unlike --no-project, which still reports its own
+        /// finding
         #[arg(long = "ignore")]
         ignore: Vec<String>,
     },
@@ -214,18 +188,11 @@ enum ProjectsAction {
     Unregister { path: Option<String> },
 }
 
-/// Resolves a raw CLI path argument to an absolute path before it's
-/// used anywhere — purely lexical (`std::path::absolute`, not
-/// `canonicalize`): joins against the current directory and normalizes
-/// `.`/`..` components without touching the filesystem or requiring the
-/// path to already exist, since `convert`'s whole point is to work with
-/// not-yet-existing targets too. A relative argument (e.g. a typo
-/// missing a leading `/`) must never silently operate on, or create,
-/// state relative to whatever the current directory happens to be —
-/// this is the fix for exactly that: a stray subvolume and a
-/// confusingly relative-looking lock file, both created under the
-/// wrong location, traced back to an unresolved relative `convert`
-/// argument.
+/// Resolves a raw CLI path argument to an absolute path before use —
+/// purely lexical (`std::path::absolute`, not `canonicalize`), so it
+/// works without the path existing yet. Every path argument must go
+/// through this so a relative argument never silently operates
+/// relative to whatever the current directory happens to be.
 #[cfg(target_os = "linux")]
 fn absolutize(path: &str) -> anyhow::Result<PathBuf> {
     std::path::absolute(path).map_err(|e| anyhow::anyhow!("could not resolve path {path:?}: {e}"))

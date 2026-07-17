@@ -1,14 +1,6 @@
-// GhostVolumes LD_PRELOAD shim (§5). Compiled standalone by bare
-// `rustc --edition 2021 --crate-type cdylib` from `build.rs` (Step
-// 12c) - never through `cargo build`, so no crates.io crate can be
-// linked. `mod`-includes the dependency-free logic shared with the
-// main CLI; hand-declares `extern "C"` only for the handful of things
-// with no `std` equivalent: `dlsym` (RTLD_NEXT symbol resolution) and
-// the exported `mkdir`/`mkdirat` replacement symbols themselves.
-// Everything else (reading compiled.tsv, running `git`, `stat`-ing
-// paths, getting the cwd) uses plain `std` - see plan §8.1 for why
-// that's fine even though external crates aren't ("dependency-free"
-// means no crates.io crates, not no std).
+// GhostVolumes LD_PRELOAD shim (§5). Compiled standalone by bare `rustc`
+// (no cargo, no crates.io crates). Hand-declares `extern "C"` only for
+// `dlsym` and the exported `mkdir`/`mkdirat` symbols; everything else uses `std`.
 
 mod btrfs_core;
 mod cache_core;
@@ -53,23 +45,17 @@ fn real_mkdirat() -> MkdiratFn {
 }
 
 /// `~/.local/share/ghostvolumes` (or `$XDG_DATA_HOME`-relative
-/// equivalent) - where `compiled.tsv` lives, and the default location
-/// for the debug log if `GHOSTVOLUMES_LOG_FILE` isn't set. `None` if
-/// `$HOME` isn't set at all (rare, but must degrade gracefully rather
-/// than panic - see `load_cache`'s doc comment).
+/// equivalent) - where `compiled.tsv` and the debug log live. `None`
+/// if `$HOME` isn't set (must degrade gracefully, not panic).
 fn resolved_data_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
     Some(xdg_core::data_dir_from(&home, xdg_data_home.as_deref()))
 }
 
-/// Loads `compiled.tsv` (§8.0) from the same path `reload`/`init`
-/// write it to - resolved via the shared `xdg_core` logic, since a
-/// custom `XDG_DATA_HOME` must be honored identically on both sides.
-/// Any failure (no `$HOME`, file missing, unreadable) degrades to an
-/// empty cache - "match nothing, pass every call through" - never a
-/// panic. A broken LD_PRELOAD shim must never be able to break every
-/// command on the system.
+/// Loads `compiled.tsv` (§8.0). Any failure (no `$HOME`, missing or
+/// unreadable file) degrades to an empty cache ("match nothing, pass
+/// every call through") rather than a panic.
 fn load_cache() -> Vec<(String, String)> {
     let Some(data_dir) = resolved_data_dir() else {
         return Vec::new();
@@ -80,11 +66,9 @@ fn load_cache() -> Vec<(String, String)> {
     }
 }
 
-/// Loads the registered project-roots list (plan §3) - same
-/// never-panic, degrade-to-empty posture as `load_cache`. A missing
-/// file just means no project has been explicitly registered yet; the
-/// walk-up boundary then falls back to the broader `compiled.tsv` row
-/// alone (see `walkup_boundary`).
+/// Loads the registered project-roots list (plan §3), same
+/// degrade-to-empty posture as `load_cache`. Missing file means no
+/// project registered yet; falls back to `compiled.tsv` alone.
 fn load_project_roots() -> Vec<String> {
     let Some(data_dir) = resolved_data_dir() else {
         return Vec::new();
@@ -95,17 +79,10 @@ fn load_project_roots() -> Vec<String> {
     }
 }
 
-/// The decision-file walk-up's stopping boundary for `target` (plan
-/// §3): the longest ancestor-or-self prefix among `compiled.tsv`'s own
-/// rows *and* the registered project-roots list, whichever is more
-/// specific. Reuses `cache_core::longest_matching_prefix` over a
-/// combined row set (synthesizing a `(root, "", false)` row per
-/// registered path) rather than duplicating its max-by-length logic.
-/// `target` already matched a `compiled.tsv` row's prefix by the time
-/// this runs (the existing name/root filter in `decide()`), so the
-/// `compiled.tsv` half alone always yields at least one candidate;
-/// falling back to `target`'s parent below is unreachable in practice,
-/// kept only so this never panics if that invariant ever changes.
+/// The decision-file walk-up's stopping boundary for `target` (plan §3):
+/// the longest ancestor-or-self prefix among `compiled.tsv`'s rows and
+/// the registered project-roots list. Parent-of-target fallback is
+/// unreachable in practice; kept only so this never panics.
 fn walkup_boundary(rows: &[(String, String)], target: &Path) -> PathBuf {
     let project_roots = PROJECT_ROOTS.get_or_init(load_project_roots);
     let combined = rows.iter().cloned().chain(
@@ -129,17 +106,10 @@ struct LogContext {
     verbosity: debug_core::Verbosity,
 }
 
-/// Resolves verbosity and the log file (§8.5, leveled verbosity per
-/// `ai-work/tasks/leveled-verbosity.plan.md`) purely from environment
-/// variables — `GHOSTVOLUMES_DEBUG` (`error`/`warn`/`info`/`debug`/
-/// `trace`, default `info` — see `debug_core::configured_verbosity`)
-/// and `GHOSTVOLUMES_LOG_FILE` (defaults to `<data_dir>/shim.log` if
-/// unset). No TOML/config file involved: env vars are read live on
-/// every process start, so there's no compiled artifact that can go
-/// stale relative to a config file, and no hand-rolled file-format
-/// parsing to get subtly wrong for a setting this simple. A
-/// missing/unopenable log path degrades to "no logging," same
-/// never-panic-never-break-the-host-process posture as `load_cache`.
+/// Resolves verbosity and the log file (§8.5) purely from env vars —
+/// `GHOSTVOLUMES_DEBUG` (`error`/`warn`/`info`/`debug`/`trace`, default
+/// `info`) and `GHOSTVOLUMES_LOG_FILE` (defaults to `<data_dir>/shim.log`).
+/// A missing/unopenable log path degrades to "no logging."
 fn load_log_context() -> LogContext {
     let verbosity = debug_core::configured_verbosity();
 
@@ -161,15 +131,10 @@ fn load_log_context() -> LogContext {
     LogContext { file, verbosity }
 }
 
-/// `GHOSTVOLUMES_AUTO_YES` (ai-work/tasks/decision-model.plan.md §4):
-/// any value other than empty/`0` bypasses the decision-file lookup
-/// entirely and always accepts, restoring the tool's original
-/// fully-automatic behavior. Nothing gets recorded when this is set —
-/// the env var itself is the standing approval. Read live, same as
-/// `GHOSTVOLUMES_DEBUG` - not recommended, since it gives up this
-/// design's whole "every subvolume traces back to an explicit
-/// decision" transparency guarantee, but available for anyone who
-/// wants the old behavior back.
+/// `GHOSTVOLUMES_AUTO_YES` (§4): any value other than empty/`0` bypasses
+/// the decision-file lookup entirely and always accepts. Nothing gets
+/// recorded when this is set — gives up the transparency guarantee, but
+/// available for anyone who wants the old fully-automatic behavior back.
 fn auto_yes_enabled() -> bool {
     match std::env::var("GHOSTVOLUMES_AUTO_YES") {
         Ok(value) => !value.is_empty() && value != "0",
@@ -182,12 +147,9 @@ fn log_ctx() -> &'static LogContext {
 }
 
 /// Writes one line to the log file, if configured and openable. Never
-/// prints to stdout/stderr under any circumstances — the shim runs
-/// injected into arbitrary host processes, and writing to their
-/// standard streams risks corrupting a TUI or polluting output the
-/// host process doesn't expect (§8.5). `debug_core::format_line`
-/// renders the timestamp/pid/level head shared with the CLI's own
-/// trace output.
+/// prints to stdout/stderr — the shim runs injected into arbitrary host
+/// processes, and writing to their standard streams risks corrupting a
+/// TUI or polluting output the host process doesn't expect (§8.5).
 fn log_line(level: debug_core::Verbosity, msg: &str) {
     let Some(file) = &log_ctx().file else {
         return;
@@ -195,32 +157,22 @@ fn log_line(level: debug_core::Verbosity, msg: &str) {
     let Ok(mut file) = file.lock() else {
         return;
     };
-    // One write_all call for the whole formatted line, not writeln!'s
-    // multi-piece format string (each literal/argument is its own
-    // write() syscall) - concurrent shim instances (e.g. many processes
-    // under one `make -j`) could otherwise interleave/garble each
-    // other's log lines (ai-work/tasks/atomic-file-io.plan.md §3). The
-    // `Mutex` above only serializes threads within *this* process; it's
-    // this single-write_all that makes a line atomic across processes
-    // too, on an O_APPEND-opened file.
+    // Single write_all call (not writeln!'s multi-piece writes) so a line
+    // stays atomic across concurrent shim processes on an O_APPEND file;
+    // the Mutex above only serializes threads within this process.
     let line = format!("{}\n", debug_core::format_line(level, msg));
     let _ = file.write_all(line.as_bytes());
 }
 
-/// Logged whenever configured verbosity is `Info` or more verbose —
-/// reserved for critical/important events (a subvolume actually
-/// created, or an unexpected error), per §8.5's "normal mode logs only
-/// critical info." Always true at the default `Info` level; only
-/// suppressed if someone explicitly lowers verbosity to `warn`/`error`.
+/// Logged at `Info` verbosity or more — reserved for critical events
+/// (a subvolume created, or an unexpected error). On by default.
 fn log_important(msg: String) {
     if log_ctx().verbosity >= debug_core::Verbosity::Info {
         log_line(debug_core::Verbosity::Info, &msg);
     }
 }
 
-/// Only logged when verbosity is `Debug` or more verbose — every
-/// interception decision and why, for troubleshooting "why did/didn't
-/// this become a subvolume." Takes a closure so the (never free)
+/// Only logged at `Debug` verbosity or more. Takes a closure so the
 /// `format!` work only happens when it'll actually be shown.
 fn log_debug(msg: impl FnOnce() -> String) {
     if log_ctx().verbosity >= debug_core::Verbosity::Debug {
@@ -234,9 +186,8 @@ extern "C" fn init_shim() {
 }
 
 // One-time config load at process start, before any intercepted mkdir
-// call can happen - the same mechanism __attribute__((constructor))
-// uses in C. Crates like `ctor` aren't available without dependency
-// resolution, so this is hand-written (plan §8.1).
+// call - same mechanism as C's __attribute__((constructor)), hand-written
+// since crate-based helpers like `ctor` aren't available (plan §8.1).
 #[used]
 #[link_section = ".init_array"]
 static INIT_ARRAY: extern "C" fn() = init_shim;
@@ -256,9 +207,8 @@ fn dirfd_path(dirfd: c_int) -> PathBuf {
 }
 
 /// Resolves a raw C string path argument to an absolute `PathBuf`.
-/// `base` is a closure (not a value) so the cwd/dirfd lookup - a
-/// syscall - only happens when the path actually turns out to be
-/// relative, not on every call regardless.
+/// `base` is a closure so the cwd/dirfd syscall only happens when the
+/// path actually turns out to be relative.
 fn resolve_path(raw: *const c_char, base: impl FnOnce() -> PathBuf) -> Option<PathBuf> {
     if raw.is_null() {
         return None;
@@ -278,24 +228,17 @@ enum Decision {
     NoCacheMatch,
     AlreadySubvolume,
     Denied,
-    /// Carries the resolved walk-up boundary (the project-root decision
-    /// file's own directory), so `handle_intercept` can append a
+    /// Resolved walk-up boundary, so `handle_intercept` can append a
     /// pending-comment line there (§4) without recomputing it.
     Undecided(PathBuf),
-    /// Carries the same walk-up boundary too - `try_create_subvolume`
-    /// needs it to compute which per-boundary lock file coordinates
-    /// with `convert`'s directory swap (ai-work/tasks/atomic-file-io.plan.md
-    /// §6).
+    /// Resolved walk-up boundary, needed to pick the per-boundary lock
+    /// file that coordinates with `convert`'s directory swap (§6).
     Accept(PathBuf),
 }
 
-/// Does `target` match a watched name under a configured root (one
-/// pass over the compiled rows does root-gating and name-matching
-/// together, since every row is already root-scoped - see §8.0), is
-/// it not already a subvolume (a `stat()`), and what does the nearest
-/// decision file along the walk-up (§3, replacing the old git-tracked
-/// gate) say about it — a recorded `+`, a recorded `-`, or nothing at
-/// all?
+/// Does `target` match a watched name under a configured root, is it
+/// not already a subvolume, and what does the nearest decision file
+/// along the walk-up (§3) say about it — `+`, `-`, or nothing?
 fn decide(target: &Path) -> Decision {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str()))
     else {
@@ -337,25 +280,10 @@ fn decide(target: &Path) -> Decision {
     }
 }
 
-/// Appends a `? <pattern>` pending-marker line (§4) to the project's
-/// top-level decision file at `boundary`, noting `target` as an
-/// undecided candidate — best-effort deduplicated against the file's
-/// current content, so repeated builds hitting the same undecided
-/// candidate don't pile up duplicate lines. Silently does nothing if
-/// `target` somehow isn't under `boundary`, the decisions lock can't be
-/// acquired (contended, or `$HOME`/`$XDG_DATA_HOME` don't resolve), or
-/// the file can't be read/opened — never a hard failure path, same
-/// posture as logging. Non-blocking, same reasoning as
-/// `try_create_subvolume`'s own lock: this runs inside an intercepted
-/// `mkdir`/`mkdirat` call, and a hang here would freeze the host build.
-///
-/// Takes its own lock (`locks/decisions/<boundary>.lock`, distinct from
-/// `try_create_subvolume`'s `locks/<boundary>.lock`) because this is a
-/// read-then-write against the same file `convert` may be concurrently
-/// rewriting in place (toggling a pending marker into a real decision)
-/// — the first read-modify-write on a decision file anywhere in this
-/// design; every other decision-file write, this one included until
-/// now, was ever only a pure append.
+/// Appends a `? <pattern>` pending-marker line (§4), deduplicated
+/// against existing content; no-ops silently on any failure. Uses its
+/// own non-blocking lock, since `convert` may concurrently rewrite the
+/// same file and this must not block inside an intercepted call.
 fn append_pending_marker(boundary: &Path, target: &Path) {
     let Some(pattern) = decision_core::anchored_pattern(boundary, target) else {
         return;
@@ -388,34 +316,19 @@ fn append_pending_marker(boundary: &Path, target: &Path) {
     }
 }
 
-/// Outcome of `try_create_subvolume` - a plain `bool` can't distinguish
-/// "the ioctl itself failed" from "skipped because another process
-/// (almost certainly `convert`, mid directory-swap) holds this
-/// project's lock right now" (ai-work/tasks/atomic-file-io.plan.md
-/// §6), which `handle_intercept`'s logging needs to tell apart.
+/// Outcome of `try_create_subvolume` - distinguishes an ioctl failure
+/// from being skipped because another process (e.g. `convert`) holds
+/// this project's lock, for `handle_intercept`'s logging.
 enum CreateResult {
     Created,
     LockContended,
     Failed,
 }
 
-/// Attempts `BTRFS_IOC_SUBVOL_CREATE` for `target`, tolerating
-/// `EEXIST` gracefully - real traces show tools retry directory
-/// creation bottom-up after an initial `ENOENT` on the leaf, which
-/// looks like duplicate `mkdir` calls for the same path (plan §5
-/// point 7).
-///
+/// Attempts `BTRFS_IOC_SUBVOL_CREATE` for `target`, tolerating `EEXIST`.
 /// Guarded by a non-blocking `try_lock()` on `boundary`'s per-project
-/// lock file (ai-work/tasks/atomic-file-io.plan.md §6) - coordinates
-/// with `convert`'s directory-swap, which takes the same lock
-/// (blocking) around its own create/copy/rename sequence for a
-/// candidate under this same boundary. Never blocks: this runs inside
-/// an intercepted `mkdir`/`mkdirat` call, and a hang here would freeze
-/// the host build - on contention (or if the lock can't be
-/// established at all, e.g. `$HOME`/`$XDG_DATA_HOME` don't resolve),
-/// this skips creating a subvolume for *this* call and falls through
-/// to the real syscall, same as any other decline; a later build or an
-/// explicit `convert` picks it up.
+/// lock file, coordinating with `convert`'s own lock; must not block
+/// (falls through to the real syscall on contention).
 fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str()))
     else {
@@ -444,14 +357,9 @@ fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
 /// handled (`true`) or the caller should fall through to the real
 /// syscall (`false`).
 fn handle_intercept(syscall: &str, target: &Path) -> bool {
-    // Logged before `decide()` even runs, so debug-mode troubleshooting
-    // (and tests) can tell "the shim was entered but decided X" apart
-    // from "the shim was never entered for this call at all" - the
-    // latter happens legitimately whenever the calling program itself
-    // resolves the outcome without ever reaching mkdir()/mkdirat() (e.g.
-    // some `mkdir` implementations `stat()` an already-existing target
-    // and skip the syscall entirely - see plan §8.5 and
-    // ai-work/tasks/ci-debug-log-test.plan.md).
+    // Logged before `decide()` runs, so debug output can tell "entered
+    // but decided X" apart from "never entered" (some `mkdir`
+    // implementations skip the syscall entirely via a pre-check `stat`).
     log_debug(|| format!("{syscall} {} -> ENTER", target.display()));
     match decide(target) {
         Decision::Accept(boundary) => match try_create_subvolume(target, &boundary) {
@@ -496,10 +404,8 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
             false
         }
         Decision::Undecided(boundary) => {
-            // Always logged, not debug-gated (plan §4) - this is the
-            // one signal a human has that a decision is waiting to be
-            // made, so it can't be silent-by-default the way most
-            // decide() outcomes are.
+            // Always logged, not debug-gated (§4): the one signal a human
+            // has that a decision is waiting to be made.
             log_important(format!(
                 "{syscall}: undecided, skipping {}",
                 target.display()

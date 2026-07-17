@@ -1,40 +1,12 @@
-//! Refuses to run at all if `LD_PRELOAD` already contains this
-//! installation's own shim — see `design.md`'s "shell-init's
-//! `LD_PRELOAD` export is a diagnostic tool" entry for the full
-//! reasoning. In short: this almost always means `shell-init`'s export
-//! line was sourced into a shell rc file (not recommended), so
-//! `ghostvolumes` itself inherited `LD_PRELOAD` from the shell — for
-//! every subcommand, not just the build command `intercept` means to
-//! wrap. Running with the shim active in this very process risks
-//! silently redirecting its own internal directory creation
-//! (`convert`/`register`/`init`) into a subvolume if it ever happens to
-//! match a recorded decision, and silently breaks `intercept`'s own
-//! documented "parent never has it set" invariant. Applies uniformly to
-//! every subcommand, including from inside an `intercept -- bash`
-//! session — running `ghostvolumes` management commands there isn't a
-//! workflow this design supports at all, not a case this guard carves
-//! an exception for (see `design.md`).
-//!
-//! Matches by the shim's *filename* only, not its full resolved path —
-//! deliberately more permissive than an exact-path comparison. A
-//! full-path comparison would silently miss the exact misconfiguration
-//! this guard exists for whenever the current process resolves `$HOME`/
-//! `$XDG_DATA_HOME` differently than whatever shell originally sourced
-//! the rc-file export (a symlinked `$HOME`, `sudo -E`, a container
-//! remounting home) — a false negative in precisely the confusing edge
-//! cases where it would matter most. Basename matching has no such
-//! blind spot, and doesn't need `$HOME` to resolve at all to run. Its
-//! own failure mode — some *unrelated* file coincidentally sharing this
-//! exact distinctive name — is negligible by comparison, and is
-//! exactly what the identifiable rename away from a generic
-//! `preload.so` was for.
+//! Refuses to run if `LD_PRELOAD` already contains this installation's
+//! own shim (implying it leaked in via a shell rc file), which risks
+//! redirecting internal directory creation into a subvolume. Matches by
+//! filename only, so it's robust to how `$HOME` resolves.
 
 use std::path::Path;
 
-/// `true` iff any colon-separated entry in `ld_preload` (`ld.so`'s own
-/// `LD_PRELOAD` format; `None` if the env var isn't set at all) has
-/// `shim_file_name` as its filename, ignoring whatever directory it's
-/// otherwise reported at.
+/// `true` iff any colon-separated entry in `ld_preload` has
+/// `shim_file_name` as its filename, ignoring its directory.
 fn already_preloaded(ld_preload: Option<&str>, shim_file_name: &str) -> bool {
     let Some(ld_preload) = ld_preload else {
         return false;
@@ -45,9 +17,7 @@ fn already_preloaded(ld_preload: Option<&str>, shim_file_name: &str) -> bool {
     })
 }
 
-/// `ld_preload` is injectable (rather than reading `std::env::var`
-/// internally) so this is unit-testable without mutating process-wide
-/// environment state — the real caller passes
+/// `ld_preload` is injectable for testability; the real caller passes
 /// `std::env::var("LD_PRELOAD").ok().as_deref()`.
 pub fn refuse_if_shim_preloaded(
     ld_preload: Option<&str>,

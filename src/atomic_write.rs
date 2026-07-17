@@ -1,28 +1,17 @@
-//! Shared atomic-write helper: temp file in the same directory,
-//! `rename` over the destination. Used by `reload` (compiled.tsv) and
-//! `scan --save` (roots.d/00-auto.toml) — never leaves the destination
-//! half-written even if the process is killed mid-write.
+//! Shared atomic-write helper: temp file in the same directory, `rename`
+//! over the destination — never leaves the destination half-written.
 //!
-//! The temp filename includes this process's PID and a per-process
-//! counter, not just the destination's own name — two concurrent
-//! writers to the *same destination* must never share one temp path.
-//! With a shared fixed name, the second writer's open-and-truncating
-//! `std::fs::write` can land while the first is still writing,
-//! corrupting the temp file's content before either renames — a torn
-//! write, not just "last write wins." Unique names make the worst case
-//! an ordinary last-valid-rename-wins instead (see
-//! `atomic-file-io.plan.md`).
+//! The temp filename includes the PID and a per-process counter: two
+//! concurrent writers must never share one temp path, or one's write
+//! could corrupt the other's temp file before either renames.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A temp path in `dir` that no other call, in this or any other
-/// process, can ever produce for the same instant — PID (unique across
-/// processes at any given time) plus a monotonic per-process counter
-/// (unique across repeated calls within one process, even if two calls
-/// land in the same instant).
+/// A temp path in `dir` no other call can produce at the same instant:
+/// PID plus a monotonic per-process counter.
 fn unique_tmp_path(dir: &Path, file_name: &str) -> PathBuf {
     let pid = std::process::id();
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -96,14 +85,8 @@ mod tests {
 
     #[test]
     fn concurrent_writes_to_the_same_destination_never_corrupt_it() {
-        // Regression guard for the fixed-tmp-filename bug: with a
-        // shared temp path, one writer's std::fs::write (open +
-        // truncate) could land mid-way through another's, corrupting
-        // the temp file before either renamed. With unique temp paths,
-        // every writer's own write is fully isolated, so the final
-        // content must always be exactly one writer's complete
-        // content, never a mix or a truncation - regardless of which
-        // writer's rename happens to land last.
+        // Each writer's temp path is isolated, so final content must
+        // always be exactly one writer's complete content, never a mix.
         let dir = tempdir().unwrap();
         let path = std::sync::Arc::new(dir.path().join("shared.txt"));
         let contents: Vec<String> = (0..8)

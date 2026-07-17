@@ -1,17 +1,9 @@
-//! CLI-side trace logging (`ai-work/tasks/leveled-verbosity.plan.md`).
-//! `Verbosity`/parsing fully implemented in `shim/debug_core.rs` (this
-//! file just pulls it in verbatim, same as `src/decision.rs`/
-//! `src/cache.rs`) since it's dependency-free and shared with the
-//! LD_PRELOAD shim — see that file's doc comment for why.
+//! CLI-side trace logging. `Verbosity`/parsing is shared with the shim
+//! via `shim/debug_core.rs` (pulled in verbatim below).
 //!
-//! Adds the one thing that *isn't* shared: where a trace line goes.
-//! Unlike the shim (which must never touch stdout/stderr under any
-//! circumstances, since it runs injected into arbitrary host
-//! processes), `convert`/`decide` are deliberate, foreground, human-run
-//! commands — writing to stderr by default is fine, and
-//! `GHOSTVOLUMES_LOG_FILE` (the same env var the shim already uses for
-//! its own, unconditional log file) optionally redirects it to a file
-//! instead.
+//! Adds the one thing that isn't shared: where a trace line goes. Unlike
+//! the shim (which must never touch stdout/stderr), CLI commands write
+//! to stderr by default, or to `GHOSTVOLUMES_LOG_FILE` if set.
 
 include!("../shim/debug_core.rs");
 
@@ -48,12 +40,9 @@ fn context() -> &'static Context {
     })
 }
 
-/// Traces `message()` at `level`, if `level` is at or below the
-/// currently configured verbosity (`GHOSTVOLUMES_DEBUG`, resolved once
-/// per process — default `Info`). `message` is a closure so it's only
-/// ever evaluated when it will actually be shown — no macro needed,
-/// the same lazy-evaluation shape the shim's own `log_debug` already
-/// uses.
+/// Traces `message()` at `level` if at or below the configured
+/// verbosity (`GHOSTVOLUMES_DEBUG`, default `Info`). `message` is a
+/// closure so it's only evaluated when it will actually be shown.
 pub fn trace(level: Verbosity, message: impl FnOnce() -> String) {
     let ctx = context();
     if level > ctx.verbosity {
@@ -81,14 +70,9 @@ mod trace_tests {
 
     #[test]
     fn a_suppressed_level_never_evaluates_its_message() {
-        // `context()` is a process-wide `OnceLock` (matching the
-        // shim's own `LOG_CTX`) - this test relies on the ambient test
-        // environment not setting GHOSTVOLUMES_DEBUG at all, same as
-        // every other test in this suite implicitly relies on a plain
-        // environment. Trace is always above the Info default, so this
-        // proves both the gating and the laziness together: a panic
-        // here would mean the closure got called despite being
-        // suppressed.
+        // Relies on GHOSTVOLUMES_DEBUG being unset (default Info).
+        // Trace is above that, so a panic here would mean the closure
+        // ran despite being suppressed.
         trace(Verbosity::Trace, || panic!("must not be evaluated"));
     }
 }

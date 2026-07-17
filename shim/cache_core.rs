@@ -1,31 +1,12 @@
 // Reader + matcher for the flat `compiled.tsv` cache format (§8.0).
-// Dependency-free (plain `std` only, no crate dependencies) so this
-// exact file can be shared between the main CLI (via `include!`, from
-// `src/cache.rs`) and the LD_PRELOAD shim (via `mod`, from
-// `shim/preload.rs`), which is compiled standalone by bare `rustc` and
-// can't link crates.io crates. The writer (`compile()`) lives only in
-// `src/cache.rs`, since it needs `MergedConfig` (serde-derived) — the
-// shim never writes this file, only reads it.
-//
-// Rows are `(prefix, name)`. Plain two-column format: the "proactive"
-// third column that used to exist here was removed along with `ensure`
-// and per-project `.ghostvolumes.toml`/`projects.d`
-// (ai-work/tasks/decision-model.plan.md §7) — decision files are the
-// entire per-project mechanism now, and `compiled.tsv` only ever needs
-// to answer "which names are watched under which root."
-//
-// Plain `//` comments, not `//!`/`///` doc comments: this file gets
-// spliced mid-file into src/cache.rs via `include!`, where an inner
-// doc comment (`//!`) is only legal at the very start of a file/module
-// — it would fail to compile once included partway through another
-// file's content.
+// Dependency-free (`std` only), shared between the CLI (`include!`) and
+// the shim (`mod`). The writer (`compile()`) stays in `src/cache.rs`
+// only, since it needs `MergedConfig` — the shim never writes this
+// file, only reads it. Rows are plain `(prefix, name)` pairs.
 
-// Fully-qualified paths throughout (rather than `use` at file scope):
-// this file is included both mid-file into src/cache.rs (which already
-// has its own `use`s in scope) and as its own `mod cache_core` inside
-// the shim (a separate module scope, where a bare `use` here wouldn't
-// see anything the includer imported) - qualifying every path keeps
-// both contexts unambiguous without duplicate-import errors.
+// Fully-qualified paths throughout, not `use` at file scope: this file
+// is included both mid-file into src/cache.rs and as its own `mod` in
+// the shim, two different scopes a bare `use` here can't serve both of.
 
 /// Parses `compiled.tsv` text back into `(prefix, name)` pairs —
 /// `str::split_once('\t')` per line, no external crate.
@@ -38,12 +19,10 @@ pub fn parse(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The names that apply to `path`: the union of every row whose
-/// prefix is an ancestor-or-self of `path`. This is the shim's
-/// reactive matching logic. Dead code from the main crate's own
-/// production-code perspective (only its tests and the shim's separate
-/// `mod`-based compilation call it) — allowed rather than removed,
-/// since it's very much alive there.
+/// The names that apply to `path`: the union of every row whose prefix
+/// is an ancestor-or-self of `path`. This is the shim's reactive
+/// matching logic; dead code from the main crate's own perspective but
+/// alive via the shim's separate `mod`-based compilation.
 #[allow(dead_code)]
 pub fn names_for(
     rows: &[(String, String)],
@@ -55,21 +34,7 @@ pub fn names_for(
         .collect()
 }
 
-/// The longest (most specific) row prefix that is an ancestor-or-self
-/// of `path` — the decision-file walk-up's stopping boundary
-/// (ai-work/tasks/decision-model.plan.md §3). Rows mix broad
-/// `roots.d`-derived entries with narrower registered project-root
-/// entries; using the longest match rather than just any match means
-/// the walk-up stops at the nearest boundary instead of a broader,
-/// possibly-shared one further out. `None` if `path` isn't under any
-/// row's prefix at all (the existing root/name filter already
-/// rejected it before this ever runs).
-///
-/// Wired into `decide()` (`shim/preload.rs`, via `walkup_boundary`) and
-/// into `convert`/`intercept` (CLI-side) - dead code only from the main
-/// crate's own perspective (only its tests and the shim's separate
-/// `mod`-based compilation call it, same as `names_for` above) -
-/// allowed rather than removed.
+
 #[allow(dead_code)]
 pub fn longest_matching_prefix(
     rows: &[(String, String)],

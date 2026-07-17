@@ -1,20 +1,9 @@
-//! TOML data model for `roots.d/*.toml` — the single remaining config
-//! fragment kind, since `watched.d` was folded in
-//! (`ai-work/tasks/root-watch-config.plan.md`). `projects.d/*.toml` and
-//! repo-local `.ghostvolumes.toml` were removed along with `ensure`
-//! entirely (`ai-work/tasks/decision-model.plan.md` §7) — decision files
-//! are the entire per-project mechanism now (which names, which
-//! patterns, approve/deny).
-//!
-//! A single file: an optional `default-watches` list, plus any number of
-//! root-path tables (`["/some/path"]`, via `#[serde(flatten)]`) each with
-//! their own optional `enabled`/`watches`. Every field here is
-//! `Option<T>`, never `#[serde(default)]`-coerced to a concrete value —
-//! `merge.rs`'s layered merge across multiple files needs to tell "this
-//! file doesn't mention this field" apart from "this file sets it to the
-//! same value the built-in default would produce"; defaults only get
-//! applied once, at final resolution after every file in `roots.d/` is
-//! merged.
+//! TOML data model for `roots.d/*.toml`: an optional `default-watches`
+//! list plus any number of root-path tables (via `#[serde(flatten)]`)
+//! with their own optional `enabled`/`watches`. Every field is
+//! `Option<T>`, never `#[serde(default)]`-coerced, so `merge.rs` can
+//! tell "file doesn't mention this field" apart from "file sets it to
+//! the default value" — defaults are applied once, after all files merge.
 
 use std::collections::BTreeMap;
 
@@ -28,12 +17,9 @@ pub struct RootsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_watches: Option<Vec<String>>,
-    /// Directory names never even walked into by `convert`/`discover`
-    /// (Phase 2, `ai-work/tasks/convert-project-model.plan.md`) —
-    /// global only, sibling to `default_watches`, not per-root
-    /// overridable the same way: per-root/per-project ignores are
-    /// deliberately decentralized into `.ghostvolumes-ignore` files
-    /// instead (see `merge.rs`'s doc comment).
+    /// Directory names never walked into by `convert`/`discover` —
+    /// global only, not per-root overridable; per-root/per-project
+    /// ignores live in `.ghostvolumes-ignore` files instead.
     #[serde(
         rename = "default-ignore",
         default,
@@ -45,10 +31,9 @@ pub struct RootsFile {
 }
 
 /// One root path's own table. `#[serde(deny_unknown_fields)]` catches a
-/// typo'd key (e.g. `enable` for `enabled`) as a parse error rather than
-/// silently ignoring it — safe to add here (unlike on `RootsFile` itself,
-/// where every non-`default-watches` key is deliberately meant to be
-/// accepted as *some* root path via `flatten`).
+/// typo'd key (e.g. `enable` for `enabled`) as a parse error — unlike
+/// on `RootsFile`, where any other key is meant to be accepted as a
+/// root path via `flatten`.
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RawRootEntry {

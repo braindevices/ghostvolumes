@@ -1,33 +1,18 @@
-//! The flat `compiled.tsv` cache format (§8.0): tab-separated
-//! `(prefix, name)` pairs that the LD_PRELOAD shim reads, so it doesn't
-//! have to parse TOML. Rows are keyed by each entry in `roots` (NOT a
-//! hardcoded `/`) — this is what makes `roots.d` a real, cheap,
-//! first-line filter rather than a paper requirement: a row's prefix is
-//! never broader than an actual configured root, so a path outside
-//! every root simply has no matching row.
+//! The flat `compiled.tsv` cache format: tab-separated `(prefix, name)`
+//! pairs the LD_PRELOAD shim reads without parsing TOML. Rows are keyed
+//! by each entry in `roots`, never a hardcoded `/`.
 //!
-//! Per-project rows (a project's own `watch ∪ proactive` names) were
-//! removed along with per-project `.ghostvolumes.toml`/`projects.d`
-//! entirely (ai-work/tasks/decision-model.plan.md §7) — decision files
-//! are the entire per-project mechanism now; `compiled.tsv` only ever
-//! needs the global default names under each configured root.
-//!
-//! `parse`/`names_for`/`longest_matching_prefix` (the reader half,
-//! needed by both this crate and the LD_PRELOAD shim) live in
-//! `shim/cache_core.rs` and are pulled in verbatim below — see that
-//! file's doc comment for why.
+//! `parse`/`names_for`/`longest_matching_prefix` (the reader half, used
+//! by both this crate and the shim) live in `shim/cache_core.rs` and are
+//! pulled in verbatim below.
 
 use crate::merge::MergedConfig;
 
 include!("../shim/cache_core.rs");
 
 /// Renders the merged config into `compiled.tsv` text. Writer-only;
-/// the shim never calls this (it only reads compiled.tsv), so it stays
-/// out of `shim/cache_core.rs` and can freely depend on `MergedConfig`
-/// (serde-derived, not shim-safe). Each root's `watches` is already
-/// fully resolved by `merge.rs` (its own override, or `default-watches`,
-/// with disabled roots dropped already) — this just flattens the
-/// per-root lists into rows, no cross-product needed here anymore.
+/// each root's `watches` is already fully resolved, so this just
+/// flattens the per-root lists into rows.
 pub fn compile(config: &MergedConfig) -> String {
     let mut out = String::new();
     for root in &config.roots {

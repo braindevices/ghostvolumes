@@ -1,12 +1,6 @@
 //! Parses `/proc/self/mountinfo` (format: `man 5 proc`) to find BTRFS
-//! mountpoints, for `scan`'s unprivileged detection pass (§3). Pure
-//! text-in/data-out — no filesystem access here, so fully testable
-//! without a real mount table.
-//!
-//! Line shape: `<id> <parent> <major:minor> <root> <mountpoint>
-//! <options> <optional fields...> - <fstype> <source> <super options>`.
-//! The `-` separator is what marks the end of the variable-length
-//! optional-fields section.
+//! mountpoints. Pure text-in/data-out, fully testable without a real
+//! mount table.
 
 /// Undoes mountinfo's octal escaping (`\040` for space, etc.) — mount
 /// paths containing whitespace or backslashes are escaped this way.
