@@ -28,14 +28,15 @@ That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (
 
 ## How it works
 
-Two commands, plus an explicit decision record in between:
+A directory gets a `+`/`-` decision recorded once; every future build
+reuses it automatically, no prompt, no guessing:
 
-- **`ghostvolumes intercept -- <cmd>`** runs `<cmd>` with the shim active for that command only. It intercepts `mkdir`/`mkdirat` and converts a directory into a subvolume — but only if a `+` decision is already recorded for it.
-- **`ghostvolumes convert <path> [--create <relative-path>]...`** — `<path>` is the project (a decision-file/project-roots boundary); it's never itself converted. If it isn't already covered by a registered project, `convert` asks once upfront before touching anything (see [Projects can't nest](#the-project-roots-list) for the full decision tree) — declining aborts the whole command. Every directory under `<path>` that's either a watched name or already a real subvolume (regardless of its name — a subvolume is itself evidence someone already decided to convert it) gets resolved automatically, skipping anything matching a configured ignore pattern (see below); `--create <relative-path>` (repeatable) additionally names a specific target directly, bypassing the watched-name check. An anchored `+`/`?` decision already recorded for an unwatched name, or for a name that doesn't exist on disk yet, gets resolved too — recording an anchored decision is the *persisted* equivalent of `--create`, so it keeps being honored on every future run. For each candidate: "yes"/"all" converts (creating fresh or migrating in place) and records a `+` decision; "no" converts nothing and records a `-` instead. An already-a-subvolume candidate with no recorded decision is asked about too, but differently — defaulting to **yes** on an empty answer rather than declining, since there's nothing left to convert, only a decision to record, and a hand-made subvolume is overwhelmingly likely to have been made on purpose. Run non-interactively (no TTY), it converts nothing and leaves a pending `?` marker instead, same as `intercept` below. Set `GHOSTVOLUMES_DEBUG=debug` to see why each candidate resolved the way it did. `--dry-run` prints what a real run would do instead — `would register: ...`, `would create/convert: ...`, `undecided: ... (skipped — dry run)`, `would ask to override the '-' decision for ...` — without prompting, or touching the filesystem, the decision file, or the project-roots list at all.
-- **Decision files** (`.ghostvolumes-decisions`, one per directory, gitignore-style) record what's approved (`+`), denied (`-`), or still pending (`?`) — `#` is reserved for human comments and never written or touched by the tool. `intercept` never prompts — it runs inside arbitrary subprocess trees with no guaranteed terminal — so an undecided directory is skipped, and a `?`-prefixed marker is appended for later review. `convert` is the one place prompting happens when it can, since it's a deliberate, explicit CLI invocation; when it later resolves a candidate that already has a pending marker, that same line becomes the real decision instead of leaving both around.
-- **`ghostvolumes decide <path> [--max-depth N] [--add <pattern>]... [--deny <pattern>]...`** is `convert`'s own walk-and-resolve engine (same upfront registration, same watched-name walk, same asking) with one difference: it never touches the filesystem — an existing `+` is a no-op instead of a re-materialize, and a freshly-answered "yes" only records the decision. No `--create` (naming something explicitly to materialize conflicts with `decide`'s contract). Three things happen, in order: (1) each `--add`/`--deny` pattern is recorded verbatim, no anchoring or broadening computed, since you're specifying the pattern directly — the original "hand-author ahead of time" use case; (2) the filesystem is walked exactly like `convert`, resolving (not converting) anything undecided that step 1 didn't already cover; (3) any `?` pending marker still left in the project's own decision file — one whose candidate doesn't exist on disk at all, so the walk in step 2 could never reach it — gets resolved the same way. A pattern that exactly matches an existing pending `?` marker (from `--add`/`--deny`, or from asking about it in steps 2/3) toggles that line in place instead of adding a second one.
+- **`ghostvolumes intercept -- <cmd>`** — runs `<cmd>` with the shim active, converting anything already decided `+`. Never prompts.
+- **`ghostvolumes convert <path>`** — registers `<path>` as a project, then walks it asking about each undecided candidate, converting and recording a decision as it goes.
+- **`ghostvolumes decide <path>`** — the same walk as `convert`, but only ever records decisions, never touches the filesystem.
+- **`ghostvolumes discover [path]`** — a read-only survey of an arbitrary path, suggesting `decide`/`convert` commands to run rather than acting itself.
 
-See [design.md](design.md) for the full rationale behind this model.
+See **[how-it-works.md](how-it-works.md)** for the full guide (decision file syntax, ignore tiers, the project-roots/no-nesting rules) and **[discover.md](discover.md)** for `discover` specifically. [design.md](design.md) has the full rationale, and [FAQ.md](FAQ.md) has common workflow questions.
 
 ## Commands
 
@@ -44,7 +45,7 @@ See [design.md](design.md) for the full rationale behind this model.
 | `ghostvolumes roots scan [--save]` | Detect BTRFS snapshot-managed roots |
 | `ghostvolumes roots list` | List every configured root and its effective watch list |
 | `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d` |
-| `ghostvolumes discover [PATH] [--max-depth N] [--save]` | Find subvolumes that already exist and suggest decision-file lines |
+| `ghostvolumes discover [PATH] [flags]` | Survey for undecided directories and drift, suggesting `decide`/`convert` commands to run — see [discover.md](discover.md) |
 | `ghostvolumes convert <path> [--max-depth N] [--create <relative-path>]... [--dry-run]` | Register `<path>` as a project (asks if not already), then recursively resolve subvolume candidates under it |
 | `ghostvolumes decide <path> [--max-depth N] [--add <pattern>]... [--deny <pattern>]...` | Walk and resolve decisions like `convert`, but never convert anything; also hand-authors `+`/`-` decisions directly |
 | `ghostvolumes projects list` | List registered project roots, flagging any that no longer exist |
@@ -85,74 +86,12 @@ path — each root path is its own independent entry.
 
 `default-ignore` is global-only — unlike `watches`, there's no
 per-root `["/path"] ignore = [...]` override. Per-root/per-project
-ignore patterns instead live in their own `.ghostvolumes-ignore` file
-(see below), decentralized rather than merged through `roots.d`.
+ignore patterns instead live in their own `.ghostvolumes-ignore` file,
+decentralized rather than merged through `roots.d` — see
+[how-it-works.md](how-it-works.md#ignoring-directories-entirely).
 
-### Ignoring directories entirely
-
-`convert`'s and `discover`'s walks never even check an ignored
-directory for a watched-name match, let alone descend into it — same
-pattern grammar a decision file uses (bare `name`, anchored `/name`,
-`/a/b/**/name`), but no `+`/`-`/`?` prefix, since there's nothing to
-decide here, only whether to walk in at all. Three tiers, unioned
-(matching *any* skips):
-
-| Tier | Where |
-|---|---|
-| Global | `default-ignore` in `roots.d` |
-| Volume root | `.ghostvolumes-ignore` at a `roots.d`-configured root's own path |
-| Project root | `.ghostvolumes-ignore` at a registered project's own path |
-
-Unlike decision files, a `.ghostvolumes-ignore` file exists *only* at
-that one boundary location — it's never walked up through every
-intermediate directory — though a `**` pattern inside it can still
-reach arbitrary depth from there, the same way a single `.gitignore`
-at a repo root reaches deep paths. `discover` (which isn't tied to any
-one registered project) only honors the global tier.
-
-### Decision files
-
-Per-project, committed to the repo they live in — one `.ghostvolumes-decisions` file per directory:
-
-```gitignore
-# .ghostvolumes-decisions at a project root
-+ node_modules                 # matches this name at any depth
-+ /dist                        # anchored: this exact location only
-+ /packages/*/**/node_modules  # anchored prefix, arbitrary depth after it
-- vendor                       # never convert, at any depth
-? /build/should-review-this    # pending: the shim (or convert, run non-interactively) noted this, not yet a decision
-# a real comment, for humans only - never touched by any of the above
-```
-
-A later real decision for the *same* pattern replaces a `?` line in
-place rather than leaving both around — answering "no"/"yes" for
-`/build/should-review-this` above would turn that exact line into `-
-/build/should-review-this` or `+ /build/should-review-this`, not add a
-second line underneath it. `#` is the one prefix reserved for humans;
-nothing in this tool ever writes or rewrites a `#` line.
-
-| Pattern | Meaning |
-|---|---|
-| `name` | Any depth under this file's directory, by final path component |
-| `/name` | Anchored: exact location only |
-| `/a/b/**/name` | Anchored prefix, arbitrary depth after it |
-
-Resolution walking up from a candidate: the closest enclosing file with a matching pattern wins; within one file, the last matching line wins.
-
-### The project-roots list
-
-A plain-text file (`project-roots.list` under the XDG data directory, one path per line) telling the shim where to stop walking up when resolving decisions. `convert` registers this automatically; `ghostvolumes projects register <path>` sets it up by hand ahead of time if needed.
-
-**Projects can't nest.** At most one registered project can ever cover a given path — decision (and ignore) files already self-distribute via their own closest-file-wins walk-up, so a hierarchy of registered projects wouldn't buy anything beyond a single, correct stopping boundary. Two projects that are path-ancestor/descendant of each other but sit on *different* BTRFS volumes are treated as unrelated, not nested. Before registering a new project, `convert`/`decide` check:
-
-- Already covered by an existing, same-volume project? No-op — that project's decisions already apply.
-- Would registering it *nest over* an already-registered, same-volume descendant project? Warns and asks whether to unregister the descendant(s) and register the new, broader project instead (default: no).
-- A decision file exists at some ancestor with nothing registered covering it (a parent registration possibly forgotten)? Warns and asks whether to continue and register the narrower path anyway (default: no).
-- Otherwise, the usual "Register `<path>` as a project? [Y/n]" ask.
-
-A missing TTY at any of these aborts rather than guessing.
-
-This is genuine, persistent user data (unlike the disposable, regenerate-anytime `compiled.tsv`), so backing it up or syncing it across machines (a dotfile manager, a disk migration) is fine. Just don't hand-edit it directly — use `ghostvolumes projects register`/`unregister` instead, so a live edit never races the shim's or CLI's own reads and writes of it. Run `ghostvolumes projects unregister` (no path) any time to interactively prune entries that no longer exist, including ones that arrived already-stale via a synced/copied-in list. `ghostvolumes projects list` shows what's currently registered.
+Decision file syntax and the project-roots/no-nesting rules also live
+in [how-it-works.md](how-it-works.md) rather than here.
 
 ## Debugging
 

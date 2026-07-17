@@ -117,13 +117,32 @@ enum Command {
     Reload,
     /// Compile and install the LD_PRELOAD shim, write default config
     Init,
-    /// Find pre-existing subvolumes and suggest decision-file lines
+    /// Survey for undecided directories and suggest `decide` commands to run
     Discover {
         path: Option<String>,
+        /// How many directory levels deep to scan - defaults to a
+        /// bounded depth (unlike convert/decide's unlimited default)
+        /// since discover walks an arbitrary, unregistered path ($HOME
+        /// by default), not one already-scoped project
+        #[arg(long, default_value_t = 3)]
+        max_depth: u32,
+        /// Let a suggestion nested under `path` fold into it - without
+        /// this, `path` is assumed to be an arbitrary directory being
+        /// surveyed, not itself a project, so it never absorbs another
+        /// suggestion found underneath it
         #[arg(long)]
-        max_depth: Option<u32>,
-        #[arg(long)]
-        save: bool,
+        root_is_project: bool,
+        /// A known-not-a-project container path (repeatable) - never
+        /// used as a merge target even if it has its own finding,
+        /// same as `path` itself unless --root-is-project is passed
+        #[arg(long = "no-project")]
+        no_project: Vec<String>,
+        /// A path (repeatable) to never scan at all - no report, no
+        /// descent - for a known-noisy directory you don't want
+        /// walked, unlike --no-project which still reports its own
+        /// finding, just never merges into it
+        #[arg(long = "ignore")]
+        ignore: Vec<String>,
     },
     /// Recursively find and resolve subvolume candidates under a project
     Convert {
@@ -280,51 +299,38 @@ fn main() -> anyhow::Result<()> {
         Command::Discover {
             path,
             max_depth,
-            save,
+            root_is_project,
+            no_project,
+            ignore: ignore_paths,
         } => {
             let config_dir = xdg::config_dir()?;
             let start = match path {
                 Some(p) => absolutize(&p)?,
                 None => PathBuf::from(std::env::var("HOME")?),
             };
+            let no_project = no_project
+                .iter()
+                .map(|p| absolutize(p))
+                .collect::<anyhow::Result<Vec<PathBuf>>>()?;
+            let ignore_paths = ignore_paths
+                .iter()
+                .map(|p| absolutize(p))
+                .collect::<anyhow::Result<Vec<PathBuf>>>()?;
             let merged = merge::load_all(&config_dir)?;
             let matches = discover::walk(
                 &start,
-                max_depth,
+                Some(max_depth),
                 &merged.all_watched_names(),
                 &merged.ignore,
+                &ignore_paths,
             );
-            let suggestions = discover::group_by_parent(matches);
-            if save {
-                for s in &suggestions {
-                    let file_path = s.path.join(filenames::DECISION_FILE_NAME);
-                    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
-                    let new_lines: Vec<String> = s
-                        .names
-                        .iter()
-                        .map(|name| format!("+ {name}"))
-                        .filter(|line| !existing.lines().any(|l| l.trim() == line))
-                        .collect();
-                    if new_lines.is_empty() {
-                        continue;
-                    }
-                    use std::io::Write;
-                    let mut file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&file_path)?;
-                    // One write_all call for the whole block of new
-                    // lines, not one writeln! per line - see
-                    // register.rs's identical fix
-                    // (ai-work/tasks/atomic-file-io.plan.md §3); also
-                    // makes this whole batch of lines land as one
-                    // atomic unit rather than N separate appends.
-                    let block: String = new_lines.iter().map(|line| format!("{line}\n")).collect();
-                    file.write_all(block.as_bytes())?;
-                }
-            } else {
-                print!("{}", discover::format_decisions(&suggestions));
-            }
+            let suggestions = discover::merge_nested_suggestions(
+                discover::group_by_parent(matches),
+                &start,
+                root_is_project,
+                &no_project,
+            );
+            print!("{}", discover::format_report(&suggestions));
             Ok(())
         }
         Command::Convert {
