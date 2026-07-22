@@ -35,12 +35,18 @@ fn parse_tag(tag: &str) -> Option<(u64, u64, u64)> {
 /// build toward the next *minor* release (`X.(Y+1).0-`), matching this
 /// project's release rhythm where `develop` accumulates features;
 /// `hotfix/*` branches patch an already-released version directly
-/// (`X.Y.(Z+1)-`). `main`/`master`/detached HEAD get no suffix and no
-/// bump - they're either sitting exactly at a release or about to
-/// become one via a version bump a human makes when tagging.
+/// (`X.Y.(Z+1)-`). `main`/`master`/detached HEAD trust the latest tag
+/// directly (`{major}.{minor}.{patch}`, no suffix) rather than
+/// `cargo_pkg_version` - the latter is only the fallback when no tag
+/// is reachable at all (see `latest_tag_version`'s doc comment), so
+/// `Cargo.toml`'s `version` field no longer needs a human to keep it
+/// in sync with each release tag.
 fn compute_version(branch: Option<&str>, tag: Option<(u64, u64, u64)>, cargo_pkg_version: &str) -> String {
     match branch {
-        Some("main") | Some("master") | None => cargo_pkg_version.to_string(),
+        Some("main") | Some("master") | None => match tag {
+            Some((major, minor, patch)) => format!("{major}.{minor}.{patch}"),
+            None => cargo_pkg_version.to_string(),
+        },
         Some("develop") => match tag {
             Some((major, minor, _patch)) => format!("{major}.{}.0-alpha", minor + 1),
             None => format!("{cargo_pkg_version}-alpha"),
@@ -77,12 +83,21 @@ mod tests {
     }
 
     #[test]
-    fn main_uses_cargo_pkg_version_unchanged() {
+    fn main_uses_latest_tag_even_when_cargo_pkg_version_disagrees() {
         assert_eq!(
-            compute_version(Some("main"), Some((0, 3, 2)), "0.3.2"),
+            compute_version(Some("main"), Some((0, 8, 0)), "0.3.2"),
+            "0.8.0"
+        );
+        assert_eq!(compute_version(None, Some((0, 8, 0)), "0.3.2"), "0.8.0");
+    }
+
+    #[test]
+    fn main_falls_back_to_cargo_pkg_version_without_a_tag() {
+        assert_eq!(
+            compute_version(Some("main"), None, "0.3.2"),
             "0.3.2"
         );
-        assert_eq!(compute_version(None, Some((0, 3, 2)), "0.3.2"), "0.3.2");
+        assert_eq!(compute_version(None, None, "0.3.2"), "0.3.2");
     }
 
     #[test]
