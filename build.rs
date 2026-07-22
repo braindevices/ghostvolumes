@@ -113,6 +113,10 @@ fn main() {
         latest_tag_version(),
         &cargo_pkg_version,
     );
+    println!("cargo:warning=branch = {:?}", current_branch());
+    println!("cargo:warning=tag = {:?}", latest_tag_version());
+    println!("cargo:warning=cargo = {}", cargo_pkg_version);
+    println!("cargo:warning=version = {}", version);
     println!("cargo:rustc-env=GHOSTVOLUMES_VERSION={version}");
 
     let target = env::var("TARGET").unwrap();
