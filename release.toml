@@ -1,16 +1,15 @@
-# cargo-release config for the manual release workflow
-# (.github/workflows/release.yml). Real releases only ever happen on
-# `main`, one at a time, human-triggered via workflow_dispatch - see
-# ai-work/tasks/release-workflow.plan.md for the full rationale.
+# cargo-release config for .github/workflows/release.yml - human-
+# triggered, main-only. See ai-work/tasks/release-workflow.plan.md.
 
-# Refuses to run anywhere else - the built-in equivalent of the
-# hand-rolled "must be on main" check from the earlier draft script.
+# Only main may release.
 allow-branch = ["main"]
 
-# `--no-publish` (passed by the workflow, not on crates.io) skips
-# cargo-release's own package/verify/upload chain entirely, so this is
-# the actual safety gate before tagging - same as `cargo test` being an
-# explicit step in the earlier hand-rolled script.
-pre-release-hook = ["cargo", "test"]
+# Not `cargo test`: the release runner has no BTRFS, so every
+# BTRFS-dependent test would fail here regardless of correctness.
+# `build --release` still catches a broken compile. Real correctness
+# gating is main's branch protection requiring ci.yml's `test` job
+# (real BTRFS) before merge - confirm that's configured, since this
+# hook doesn't re-check it.
+pre-release-hook = ["cargo", "build", "--release"]
 
 pre-release-commit-message = "chore(release): v{{version}}"
