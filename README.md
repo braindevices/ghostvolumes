@@ -43,6 +43,16 @@ ghostvolumes roots scan --save   # detect your snapshot-managed BTRFS roots
 
 That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](documents/FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](documents/FAQ.md) for the recommended workflow.
 
+Add `--tag vX.Y.Z` (see [Releases](https://github.com/braindevices/ghostvolumes/releases)) to pin a specific version instead of building off the tip of `main`. Either way, `cargo install --git` clones the whole repository, including this project's own `ai-work/` planning notes.
+
+Prefer not to have those included? Download a release's source archive instead (`ai-work/` is excluded there — see its `.gitattributes`) and install from the extracted directory:
+
+```bash
+curl -L -o ghostvolumes.tar.gz https://github.com/braindevices/ghostvolumes/archive/refs/tags/vX.Y.Z.tar.gz
+tar xf ghostvolumes.tar.gz
+cargo install --path ghostvolumes-X.Y.Z
+```
+
 ## Shell completions
 
 Dynamic — subcommands/flags plus live data (registered projects, pending `?` patterns for `decide --add`/`--deny`), not a static snapshot:

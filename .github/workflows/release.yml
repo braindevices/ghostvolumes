@@ -57,3 +57,23 @@ jobs:
       - name: cargo release
         run: |
           cargo release "${{ inputs.level }}" --no-publish ${{ inputs.execute && '--execute --no-confirm' || '' }}
+
+      - name: Create GitHub Release
+        # Only on a real (non-dry-run) release - a dry run never pushes
+        # a tag, so there'd be nothing to attach a Release to. The new
+        # version isn't otherwise captured from `cargo release`'s own
+        # output, so read it back from Cargo.toml - `cargo release`
+        # already bumped and committed it by this point in the job.
+        # `--generate-notes` uses GitHub's own commit-range changelog
+        # (commits since the previous tag) - no separate changelog
+        # mechanism needed for now. A real Release (not just a bare
+        # tag) is what makes GitHub prominently attach the "Source
+        # code (zip)"/"Source code (tar.gz)" download links, which -
+        # thanks to .gitattributes' `export-ignore` - now exclude
+        # ai-work/, unlike a plain `cargo install --git` checkout.
+        if: ${{ inputs.execute }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          gh release create "v$version" --generate-notes
