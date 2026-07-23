@@ -26,59 +26,6 @@ use vergen_gitcl::{Emitter, Gitcl};
 
 const SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
 
-/// The current branch name via `git rev-parse --abbrev-ref HEAD` -
-/// `vergen-gitcl` emits `VERGEN_GIT_BRANCH` too, but only as a
-/// `cargo:rustc-env` instruction for the *final crate* to read via
-/// `env!()`; that's not readable back here, mid-build-script, so the
-/// branch-suffix decision below needs its own independent git
-/// invocation. `None` if detached (bare `git rev-parse --abbrev-ref
-/// HEAD` prints the literal string "HEAD" in that case, e.g. exactly
-/// at a tag via `cargo install --git --tag`) or if `git`/`.git` aren't
-/// available at all - both treated as "no branch-based opinion,"
-/// which resolves to the same empty, release-shaped suffix as `main`.
-fn current_branch() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        return None;
-    }
-    Some(branch)
-}
-
-// `parse_tag`/`compute_version` - see `build_version_core.rs`'s doc
-// comment for why this is `include!`d rather than a normal `mod`
-// (its own unit tests need to run as part of the main crate's test
-// suite, via the matching `include!` in `src/main.rs`, since `cargo
-// test` never compiles `build.rs` itself with `--cfg test`).
-include!("build_version_core.rs");
-
-/// The latest reachable tag as `(major, minor, patch)`, via `git
-/// describe --tags --abbrev=0` - the bare nearest-tag name, not `git
-/// describe`'s usual `-N-gHASH` distance-from-tag form (that's
-/// `VERGEN_GIT_DESCRIBE`'s job). `None` if no tag is reachable at all -
-/// a fresh repo with no releases yet, or CI's shallow/tagless checkout
-/// (`.github/workflows/ci.yml`'s `actions/checkout@v7` doesn't fetch
-/// tags) - in which case `compute_version` falls back to trusting
-/// `Cargo.toml`'s `version` field as manually maintained, same as the
-/// old flat-suffix scheme.
-fn latest_tag_version() -> Option<(u64, u64, u64)> {
-    let output = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    parse_tag(raw.trim())
-}
-
 fn main() {
     // Emitted unconditionally, before the non-Linux early return below
     // - cheap, and avoids a future landmine where some as-yet-unwritten
@@ -87,8 +34,13 @@ fn main() {
     // failure because this line never ran for that target.
     println!("cargo:rustc-env=GHOSTVOLUMES_SHIM_FILE_NAME={SHIM_FILE_NAME}");
 
-    // `VERGEN_GIT_DESCRIBE` (and friends) for main.rs's `--version`
-    // string - `vergen-gitcl` (shells out to the `git` CLI) rather than
+    // `VERGEN_GIT_DESCRIBE` and `VERGEN_GIT_BRANCH` for main.rs's
+    // `--version` string - purely informational debug/bug-report
+    // metadata (exact commit + branch name), not part of the version
+    // number itself; `CARGO_PKG_VERSION` is always trusted verbatim for
+    // that, since real releases only ever bump it on `main`, in
+    // lockstep with the release tag (see `release.toml`/`release.yml`).
+    // `vergen-gitcl` (shells out to the `git` CLI) rather than
     // `vergen-gix`/`vergen-git2`: `git` is already a hard prerequisite
     // for this project's only supported install path (`cargo install
     // --git` needs it just to clone), so shelling out to it here costs
@@ -99,25 +51,13 @@ fn main() {
     // missing (e.g. a tarball export rather than the `cargo install
     // --git` checkout this project actually supports) - `Emitter`'s
     // default is to emit an idempotent placeholder instead of erroring,
-    // so `env!("VERGEN_GIT_DESCRIBE")` in main.rs is always defined,
-    // just not always meaningful.
+    // so `env!("VERGEN_GIT_DESCRIBE")`/`env!("VERGEN_GIT_BRANCH")` in
+    // main.rs are always defined, just not always meaningful.
     Emitter::default()
         .add_instructions(&Gitcl::all_git())
         .expect("failed to configure vergen-gitcl git instructions")
         .emit()
         .expect("failed to emit vergen-gitcl build instructions");
-
-    let cargo_pkg_version = env::var("CARGO_PKG_VERSION").unwrap();
-    let version = compute_version(
-        current_branch().as_deref(),
-        latest_tag_version(),
-        &cargo_pkg_version,
-    );
-    println!("cargo:warning=branch = {:?}", current_branch());
-    println!("cargo:warning=tag = {:?}", latest_tag_version());
-    println!("cargo:warning=cargo = {}", cargo_pkg_version);
-    println!("cargo:warning=version = {}", version);
-    println!("cargo:rustc-env=GHOSTVOLUMES_VERSION={version}");
 
     let target = env::var("TARGET").unwrap();
     // On non-Linux, src/main.rs's Command::new mod (and everything

@@ -1,12 +1,6 @@
 // BTRFS ioctls, LD_PRELOAD, and /proc/self/mountinfo are Linux-specific;
 // gate the whole implementation rather than fail to compile confusingly
-// elsewhere. `build_version_core.rs` has no OS dependency and is
-// included here (not gated) so its `#[cfg(test)]` tests actually run.
-#[cfg(test)]
-mod build_version_check {
-    include!("../build_version_core.rs");
-}
-
+// elsewhere.
 #[cfg(target_os = "linux")]
 mod atomic_write;
 #[cfg(target_os = "linux")]
@@ -64,17 +58,21 @@ use clap::{CommandFactory, Parser, Subcommand};
 #[cfg(target_os = "linux")]
 use clap_complete::engine::ArgValueCompleter;
 
-/// `git describe` (via `build.rs`) pins down exactly which commit was
-/// built, since `CARGO_PKG_VERSION` alone can't. `GHOSTVOLUMES_VERSION`
-/// (also `build.rs`) is a full SemVer version off the latest git tag:
-/// `develop`/`feature/*` bump the minor version, `hotfix/*` bumps the
-/// patch version, so a pre-release suffix still sorts above the last
-/// tagged release rather than looking older than what's shipped.
+/// `CARGO_PKG_VERSION` is trusted verbatim on every branch - real
+/// releases only ever bump it on `main`, in lockstep with the release
+/// tag (`release.toml`/`.github/workflows/release.yml`), so there's no
+/// drift for a branch-conditional scheme to correct for. The
+/// parenthesized part is purely informational debug/bug-report
+/// metadata, not part of the version number: `VERGEN_GIT_DESCRIBE`
+/// (via `build.rs`) pins down exactly which commit was built, and
+/// `VERGEN_GIT_BRANCH` says which branch it was built from.
 #[cfg(target_os = "linux")]
 const VERSION: &str = concat!(
-    env!("GHOSTVOLUMES_VERSION"),
+    env!("CARGO_PKG_VERSION"),
     " (",
     env!("VERGEN_GIT_DESCRIBE"),
+    ", ",
+    env!("VERGEN_GIT_BRANCH"),
     ")"
 );
 
