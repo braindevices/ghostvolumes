@@ -1,11 +1,8 @@
 name: Release
 
-# Human-triggered only, deliberately - not on every push/merge to main.
-# Auto-releasing every commit was considered and rejected: it'd create
-# a persistent git tag per merge (noisy, and redundant with what
-# VERGEN_GIT_DESCRIBE already gives for free per-commit with zero
-# tagging), plus the self-trigger risk of a bot commit re-firing this
-# same workflow. See ai-work/tasks/release-workflow.plan.md.
+# Human-triggered only - auto-releasing every merge was rejected as
+# noisy (a tag per commit) and risks a bot-commit self-trigger loop.
+# See ai-work/tasks/release-workflow.plan.md.
 on:
   workflow_dispatch:
     inputs:
@@ -30,6 +27,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
@@ -37,10 +35,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Full history + tags - cargo-release needs to see the
-          # latest reachable tag to compute the next version, unlike
-          # ci.yml's jobs which never need real tag data.
+          # Full history + tags - cargo-release needs the latest tag.
           fetch-depth: 0
+
+      - name: Require ci.yml to have passed for this commit
+        # release.toml's pre-release-hook only runs `cargo build`
+        # (no BTRFS on this runner) - this is the actual correctness
+        # gate, checked explicitly rather than left to branch
+        # protection being configured correctly out-of-band.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          result="$(gh run list --workflow ci.yml --commit "${{ github.sha }}" \
+            --json status,conclusion --limit 1 \
+            --jq '.[0] // {status:"missing",conclusion:"missing"} | if .status != "completed" then .status else .conclusion end')"
+          if [ "$result" != "success" ]; then
+            echo "::error::ci.yml has not passed for ${{ github.sha }} (result: $result) - refusing to release"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -59,18 +71,11 @@ jobs:
           cargo release "${{ inputs.level }}" --no-publish ${{ inputs.execute && '--execute --no-confirm' || '' }}
 
       - name: Create GitHub Release
-        # Only on a real (non-dry-run) release - a dry run never pushes
-        # a tag, so there'd be nothing to attach a Release to. The new
-        # version isn't otherwise captured from `cargo release`'s own
-        # output, so read it back from Cargo.toml - `cargo release`
-        # already bumped and committed it by this point in the job.
-        # `--generate-notes` uses GitHub's own commit-range changelog
-        # (commits since the previous tag) - no separate changelog
-        # mechanism needed for now. A real Release (not just a bare
-        # tag) is what makes GitHub prominently attach the "Source
-        # code (zip)"/"Source code (tar.gz)" download links, which -
-        # thanks to .gitattributes' `export-ignore` - now exclude
-        # ai-work/, unlike a plain `cargo install --git` checkout.
+        # Only for a real release (a dry run pushes no tag). Version
+        # read back from Cargo.toml since cargo release already bumped
+        # it. A real Release (not just a tag) is what makes GitHub
+        # surface the "Source code" archive links, which - thanks to
+        # .gitattributes' export-ignore - exclude ai-work/.
         if: ${{ inputs.execute }}
         env:
           GH_TOKEN: ${{ github.token }}
