@@ -1,0 +1,16 @@
+# cargo-release config for the manual release workflow
+# (.github/workflows/release.yml). Real releases only ever happen on
+# `main`, one at a time, human-triggered via workflow_dispatch - see
+# ai-work/tasks/release-workflow.plan.md for the full rationale.
+
+# Refuses to run anywhere else - the built-in equivalent of the
+# hand-rolled "must be on main" check from the earlier draft script.
+allow-branch = ["main"]
+
+# `--no-publish` (passed by the workflow, not on crates.io) skips
+# cargo-release's own package/verify/upload chain entirely, so this is
+# the actual safety gate before tagging - same as `cargo test` being an
+# explicit step in the earlier hand-rolled script.
+pre-release-hook = ["cargo", "test"]
+
+pre-release-commit-message = "chore(release): v{{version}}"

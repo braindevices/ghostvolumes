@@ -1,0 +1,59 @@
+name: Release
+
+# Human-triggered only, deliberately - not on every push/merge to main.
+# Auto-releasing every commit was considered and rejected: it'd create
+# a persistent git tag per merge (noisy, and redundant with what
+# VERGEN_GIT_DESCRIBE already gives for free per-commit with zero
+# tagging), plus the self-trigger risk of a bot commit re-firing this
+# same workflow. See ai-work/tasks/release-workflow.plan.md.
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "Version bump level"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - rc
+          - beta
+          - alpha
+          - release
+      execute:
+        description: "Actually perform the release (unchecked = dry-run)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history + tags - cargo-release needs to see the
+          # latest reachable tag to compute the next version, unlike
+          # ci.yml's jobs which never need real tag data.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-release
+
+      - name: Configure git identity for the release commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: cargo release
+        run: |
+          cargo release "${{ inputs.level }}" --no-publish ${{ inputs.execute && '--execute --no-confirm' || '' }}
