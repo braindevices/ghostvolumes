@@ -7,6 +7,7 @@ name: CI
 # filters on the PR's *target*, not its source, so a PR from an arbitrary
 # branch into develop still triggers this).
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
