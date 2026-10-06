@@ -1,0 +1,2 @@
+- during implementation review by QA agent at each milestone
+- in security critic project, also review by another agent as security export
