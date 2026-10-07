@@ -1,27 +1,22 @@
 // BTRFS subvolume primitives: detection (inode 256, per §3/§5) and
 // creation (`BTRFS_IOC_SUBVOL_CREATE`, per §5/§7).
 //
-// Dependency-free (plain `std`, plus hand-declared `extern "C"` for
-// `open`/`close`/`ioctl`, not `libc`, since bare `rustc` can't link
-// crates.io crates). Ioctl request number and struct layout match
+// Dependency-free (plain `std`, plus a hand-declared `extern "C"` for
+// `ioctl`, not `libc`, since bare `rustc` can't link crates.io crates). Ioctl request number and struct layout match
 // `<linux/btrfs.h>`, verified against a real BTRFS filesystem.
 //
 // Uses `std::io::Result`, not `anyhow::Result`; `is_btrfs` stays
 // CLI-only in `src/btrfs.rs` and is free to use `libc` instead.
 
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 
 // Edition 2024 requires `unsafe extern` blocks; this syntax is also
 // accepted (not required) on the shim's own `--edition 2021`
 // compilation, so one spelling works for both contexts.
 unsafe extern "C" {
-    fn open(path: *const i8, flags: i32, mode: i32) -> i32;
-    fn close(fd: i32) -> i32;
     fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
 }
-
-const O_RDONLY: i32 = 0;
-const O_DIRECTORY: i32 = 0o200000;
 
 const BTRFS_PATH_NAME_MAX: usize = 4087;
 const BTRFS_IOCTL_MAGIC: u64 = 0x94;
@@ -59,12 +54,14 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
             format!("subvolume name too long: {name}"),
         ));
     }
-    let parent_c = std::ffi::CString::new(parent.as_os_str().as_encoded_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let parent_fd = unsafe { open(parent_c.as_ptr(), O_RDONLY | O_DIRECTORY, 0) };
-    if parent_fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    // Stands in for O_DIRECTORY: a read-only open of a FIFO parent would
+    // block the host process. `std` opens with O_CLOEXEC and closes on
+    // drop; no hand-declared `open` (rustc rejects one that isn't
+    // variadic like libc's).
+    if !std::fs::metadata(parent)?.is_dir() {
+        return Err(std::io::ErrorKind::NotADirectory.into());
     }
+    let parent_dir = std::fs::File::open(parent)?;
 
     let mut args = BtrfsIoctlVolArgs {
         fd: 0,
@@ -79,16 +76,13 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
     );
     let rc = unsafe {
         ioctl(
-            parent_fd,
+            parent_dir.as_raw_fd(),
             request,
             &mut args as *mut BtrfsIoctlVolArgs as *mut std::ffi::c_void,
         )
     };
-    let ioctl_err = std::io::Error::last_os_error();
-    unsafe { close(parent_fd) };
-
     if rc != 0 {
-        return Err(ioctl_err);
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -126,5 +120,21 @@ mod tests {
         let dir = btrfs_scratch_dir();
         let missing_parent = dir.path().join("does-not-exist");
         assert!(create_subvolume(&missing_parent, "x").is_err());
+    }
+
+    #[test]
+    fn fifo_parent_fails_fast_instead_of_blocking() {
+        let dir = btrfs_scratch_dir();
+        let fifo = dir.path().join("fifo");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        // A regression would block in open(); fail via timeout, not a hung test run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(create_subvolume(&fifo, "x")).unwrap());
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("create_subvolume blocked on a FIFO parent")
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
     }
 }
