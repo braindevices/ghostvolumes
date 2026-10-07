@@ -27,6 +27,12 @@ fn lock_project_roots(list_path: &Path) -> anyhow::Result<std::fs::File> {
 pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
     // Normalized before writing so the file never gains a new
     // trailing-slash entry (shell tab-completion often appends one).
+    if !crate::decision::representable_path(path.trim_end_matches('/')) {
+        anyhow::bail!(
+            "{path:?}: a project path can't contain control characters, `.`/`..`/`**`, \
+             or names with leading/trailing whitespace"
+        );
+    }
     let path = crate::project_roots::normalize_root_path(path);
 
     let _lock = lock_project_roots(list_path)?;
@@ -45,6 +51,80 @@ pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
     // Single write_all for the whole line (not writeln!): O_APPEND only
     // guarantees one write() call lands atomically, not multiple.
     file.write_all(format!("{path}\n").as_bytes())?;
+    Ok(())
+}
+
+/// Rewrites existing entries to their physical paths (what the shim
+/// sees), deduplicated in order — entries registered before paths were
+/// canonicalized at registration, e.g. under a `/home` -> `/var/home`
+/// symlink, would otherwise never match. Only *ancestors* are resolved:
+/// an entry that is itself a symlink (say, a repo directory a `git pull`
+/// replaced with a link to `~`) is kept as written with a warning,
+/// rather than silently widening its boundary. Missing entries are kept.
+pub fn canonicalize_entries(list_path: &Path) -> anyhow::Result<()> {
+    let _lock = lock_project_roots(list_path)?;
+    let Ok(existing) = std::fs::read_to_string(list_path) else {
+        return Ok(());
+    };
+    let before = crate::project_roots::parse(&existing);
+    let mut entries: Vec<String> = Vec::new();
+    for entry in &before {
+        let path = Path::new(entry);
+        let real = if path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            eprintln!(
+                "warning: registered project {entry} is itself a symlink - kept as written, \
+                 but the shim matches real paths, so it won't apply there"
+            );
+            entry.clone()
+        } else {
+            match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => parent
+                    .canonicalize()
+                    .map(|p| p.join(name).display().to_string())
+                    .unwrap_or_else(|_| entry.clone()),
+                _ => entry.clone(),
+            }
+        };
+        // A real path that can't be stored one-per-line (a resolved
+        // ancestor's name with a newline, say) keeps the entry as written.
+        let real = if crate::decision::representable_path(&real) {
+            real
+        } else {
+            eprintln!(
+                "warning: registered project {entry}: its real path {real:?} can't be stored, kept as written"
+            );
+            entry.clone()
+        };
+        if !entries.contains(&real) {
+            entries.push(real);
+        }
+    }
+    let nested = |list: &[String]| -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        for outer in list {
+            for inner in list {
+                if inner != outer && Path::new(inner).starts_with(outer) {
+                    pairs.push((outer.clone(), inner.clone()));
+                }
+            }
+        }
+        pairs
+    };
+    let nested_before = nested(&before);
+    for (outer, inner) in nested(&entries) {
+        if !nested_before.contains(&(outer.clone(), inner.clone())) {
+            eprintln!(
+                "warning: after resolving symlinks, registered project {inner} is now inside {outer}"
+            );
+        }
+    }
+    let text: String = entries.iter().map(|e| format!("{e}\n")).collect();
+    if text != existing {
+        crate::atomic_write::write_atomically(list_path, &text)?;
+    }
     Ok(())
 }
 
@@ -130,6 +210,36 @@ pub fn list_projects(list_path: &Path) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn register_rejects_unrepresentable_paths_from_any_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("project-roots.list");
+        for bad in ["/a\n/b", "/a/ b", "/a/**/b"] {
+            assert!(register(&list, bad).is_err(), "{bad:?}");
+        }
+        assert!(!list.exists());
+        register(&list, "/a/b/").unwrap(); // trailing slash is fine
+    }
+
+    #[test]
+    fn canonicalize_keeps_an_entry_whose_real_path_cant_be_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let odd = root.join("odd\nname");
+        std::fs::create_dir_all(odd.join("proj")).unwrap();
+        std::os::unix::fs::symlink(&odd, root.join("link")).unwrap();
+        let list = root.join("project-roots.list");
+        let entry = root.join("link/proj").display().to_string();
+        std::fs::write(&list, format!("{entry}\n")).unwrap();
+
+        canonicalize_entries(&list).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&list).unwrap(),
+            format!("{entry}\n")
+        );
+    }
+
     use super::*;
     use crate::filenames;
     use std::path::PathBuf;

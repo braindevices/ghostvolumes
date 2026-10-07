@@ -55,3 +55,22 @@ fn unrecognized_subcommand_fails_with_usage() {
         .failure()
         .stderr(predicate::str::contains("unrecognized subcommand"));
 }
+
+#[test]
+fn intercept_refuses_without_a_current_shim_and_runs_after_init() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("ghostvolumes").unwrap();
+        cmd.args(args)
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env_remove("LD_PRELOAD");
+        cmd.assert()
+    };
+    run(&["intercept", "--", "true"])
+        .failure()
+        .stderr(predicate::str::contains("run `ghostvolumes init`"));
+    run(&["init"]).success();
+    run(&["intercept", "--", "true"]).success();
+}

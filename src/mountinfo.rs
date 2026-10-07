@@ -6,7 +6,9 @@
 /// paths containing whitespace or backslashes are escaped this way.
 fn unescape(field: &str) -> String {
     let bytes = field.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
+    // Bytes, not chars: a raw UTF-8 byte pushed `as char` would be
+    // re-encoded as Latin-1 (`é` -> `Ã©`).
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\'
@@ -14,14 +16,14 @@ fn unescape(field: &str) -> String {
             && let Ok(octal) = std::str::from_utf8(&bytes[i + 1..i + 4])
             && let Ok(value) = u8::from_str_radix(octal, 8)
         {
-            out.push(value as char);
+            out.push(value);
             i += 4;
             continue;
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Mountpoints whose filesystem type is `btrfs`.
@@ -46,6 +48,13 @@ fn parse_line(line: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unescape_keeps_utf8_and_octal_escaped_utf8_intact() {
+        assert_eq!(unescape("/mnt/données"), "/mnt/données");
+        assert_eq!(unescape("/mnt/donn\\303\\251es"), "/mnt/données");
+        assert_eq!(unescape("/mnt/a\\040b"), "/mnt/a b");
+    }
+
     use super::*;
 
     #[test]

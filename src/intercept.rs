@@ -31,7 +31,7 @@ fn candidate_boundaries(rows: &[(String, String)], project_roots: &[String]) -> 
 fn snapshot(boundaries: &[PathBuf]) -> Vec<Option<String>> {
     boundaries
         .iter()
-        .map(|b| std::fs::read_to_string(b.join(filenames::DECISION_FILE_NAME)).ok())
+        .map(|b| crate::decision::read_regular_file(&b.join(filenames::DECISION_FILE_NAME)))
         .collect()
 }
 
@@ -96,7 +96,10 @@ fn intercept_with_notifier(
 
     let status = std::process::Command::new(program)
         .args(args)
-        .env("LD_PRELOAD", preload_so_path)
+        .env(
+            "LD_PRELOAD",
+            preload_value(std::env::var_os("LD_PRELOAD").as_deref(), preload_so_path),
+        )
         .status()?;
 
     let after = snapshot(&boundaries);
@@ -104,7 +107,31 @@ fn intercept_with_notifier(
         notify(root);
     }
 
-    Ok(status.code().unwrap_or(1))
+    // Killed by a signal: the shell convention 128+N, not a bare 1.
+    use std::os::unix::process::ExitStatusExt;
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
+/// `LD_PRELOAD` for the child: the shim appended to whatever is already
+/// preloaded (e.g. jemalloc), the same as `shell-init` does, and not
+/// added twice if it's already there.
+fn preload_value(existing: Option<&std::ffi::OsStr>, so: &Path) -> std::ffi::OsString {
+    let Some(existing) = existing.filter(|e| !e.is_empty()) else {
+        return so.as_os_str().to_owned();
+    };
+    let already = existing
+        .to_string_lossy()
+        .split([':', ' '])
+        .any(|entry| Path::new(entry) == so);
+    if already {
+        return existing.to_owned();
+    }
+    let mut value = existing.to_owned();
+    value.push(":");
+    value.push(so);
+    value
 }
 
 #[cfg(test)]
@@ -168,14 +195,53 @@ mod tests {
         let project_roots_path = dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME);
         let preload_so = dir.path().join(filenames::SHIM_FILE_NAME);
 
+        // 7 only if the child really sees the shim in LD_PRELOAD.
+        let script = format!(
+            "case \"$LD_PRELOAD\" in *{}) exit 7;; esac; exit 1",
+            preload_so.display()
+        );
         let code = intercept(
-            &["sh".to_string(), "-c".to_string(), "exit 7".to_string()],
+            &["sh".to_string(), "-c".to_string(), script],
             &preload_so,
             &cache_path,
             &project_roots_path,
         )
         .unwrap();
         assert_eq!(code, 7);
+    }
+
+    #[test]
+    fn a_signal_death_maps_to_128_plus_the_signal() {
+        let dir = tempdir().unwrap();
+        let code = intercept(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "kill -TERM $$".to_string(),
+            ],
+            &dir.path().join(filenames::SHIM_FILE_NAME),
+            &dir.path().join(filenames::COMPILED_CACHE_FILE_NAME),
+            &dir.path().join(filenames::PROJECT_ROOTS_FILE_NAME),
+        )
+        .unwrap();
+        assert_eq!(code, 128 + 15);
+    }
+
+    #[test]
+    fn preload_value_appends_once_and_keeps_existing_entries() {
+        let so = Path::new("/d/libghostvolumes_shim.so");
+        let value = |existing: Option<&str>| {
+            preload_value(existing.map(std::ffi::OsStr::new), so)
+                .into_string()
+                .unwrap()
+        };
+        assert_eq!(value(None), "/d/libghostvolumes_shim.so");
+        assert_eq!(value(Some("")), "/d/libghostvolumes_shim.so");
+        assert_eq!(value(Some("/j.so")), "/j.so:/d/libghostvolumes_shim.so");
+        assert_eq!(
+            value(Some("/j.so:/d/libghostvolumes_shim.so")),
+            "/j.so:/d/libghostvolumes_shim.so"
+        );
     }
 
     #[test]

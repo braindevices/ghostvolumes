@@ -26,6 +26,14 @@ pub struct RootsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_ignore: Option<Vec<String>>,
+    /// Delete `convert`'s `.<name>.ghostvolumes-convert-old` backup after
+    /// a successful swap instead of keeping it (default: keep).
+    #[serde(
+        rename = "delete-convert-backup",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub delete_convert_backup: Option<bool>,
     #[serde(flatten)]
     pub roots: BTreeMap<String, RawRootEntry>,
 }
@@ -145,6 +153,7 @@ mod tests {
         let file = RootsFile {
             default_watches: Some(vec!["node_modules".to_string()]),
             default_ignore: Some(vec![".git".to_string()]),
+            delete_convert_backup: None,
             roots,
         };
 

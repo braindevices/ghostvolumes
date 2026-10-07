@@ -12,11 +12,26 @@ include!("../shim/cache_core.rs");
 
 /// Renders the merged config into `compiled.tsv` text. Writer-only;
 /// each root's `watches` is already fully resolved, so this just
-/// flattens the per-root lists into rows.
+/// flattens the per-root lists into rows. A root or name that can't be
+/// written as one `prefix\tname` row (see `representable_path`; names
+/// also can't contain `/`) is skipped with a warning.
 pub fn compile(config: &MergedConfig) -> String {
     let mut out = String::new();
     for root in &config.roots {
+        if !crate::decision::representable_path(&root.path) {
+            eprintln!(
+                "warning: skipping root {:?}: not representable in compiled.tsv",
+                root.path
+            );
+            continue;
+        }
         for name in &root.watches {
+            if name.contains('/') || !crate::decision::representable_path(name) {
+                eprintln!(
+                    "warning: skipping watched name {name:?}: must be one plain directory name"
+                );
+                continue;
+            }
             out.push_str(&root.path);
             out.push('\t');
             out.push_str(name);
@@ -28,6 +43,27 @@ pub fn compile(config: &MergedConfig) -> String {
 
 #[cfg(test)]
 mod compile_tests {
+    #[test]
+    fn compile_skips_roots_and_names_that_would_break_a_row() {
+        let config = MergedConfig {
+            roots: vec![
+                ResolvedRoot {
+                    path: "/a\nb".to_string(),
+                    watches: vec!["node_modules".to_string()],
+                },
+                ResolvedRoot {
+                    path: "/ok".to_string(),
+                    watches: ["target", "x/y", "bad\tname", "**", " pad"]
+                        .map(String::from)
+                        .to_vec(),
+                },
+            ],
+            ignore: Vec::new(),
+            delete_convert_backup: false,
+        };
+        assert_eq!(compile(&config), "/ok\ttarget\n");
+    }
+
     use super::*;
     use crate::merge::ResolvedRoot;
     use std::path::Path;
@@ -44,6 +80,7 @@ mod compile_tests {
                 ],
             }],
             ignore: Vec::new(),
+            delete_convert_backup: false,
         }
     }
 
@@ -85,6 +122,7 @@ mod compile_tests {
                 },
             ],
             ignore: Vec::new(),
+            delete_convert_backup: false,
         };
         let text = compile(&config);
         assert_eq!(
@@ -114,6 +152,7 @@ mod compile_tests {
                 },
             ],
             ignore: Vec::new(),
+            delete_convert_backup: false,
         };
         let text = compile(&config);
         assert_eq!(text, "/\tnode_modules\n/home\tdist\n");

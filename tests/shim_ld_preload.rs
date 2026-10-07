@@ -25,11 +25,11 @@ fn compiled_shim() -> &'static Path {
     SHIM.get_or_init(|| {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let out =
-            std::env::temp_dir().join(format!("ghostvolumes-test-shim-{}.so", std::process::id()));
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ghostvolumes-test-shim.so");
         let status = Command::new("rustc")
             .args([
                 "--edition",
-                "2021",
+                "2024",
                 "--crate-type",
                 "cdylib",
                 "-O",
@@ -49,7 +49,7 @@ fn compiled_shim() -> &'static Path {
 fn compiled_mkdirat_probe() -> &'static Path {
     static PROBE: OnceLock<PathBuf> = OnceLock::new();
     PROBE.get_or_init(|| {
-        let src = std::env::temp_dir().join(format!("mkdirat-probe-{}.rs", std::process::id()));
+        let src = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mkdirat-probe.rs");
         std::fs::write(
             &src,
             r#"
@@ -58,18 +58,22 @@ fn compiled_mkdirat_probe() -> &'static Path {
             unsafe extern "C" {
                 fn mkdirat(dirfd: i32, path: *const std::ffi::c_char, mode: u32) -> i32;
             }
+            // Usage: probe <dir | BADFD> <name>; exits with mkdirat's errno.
             fn main() {
-                let dir = std::fs::File::open(std::env::args().nth(1).unwrap()).expect("open failed");
+                let arg = std::env::args().nth(1).unwrap();
+                let dir = (arg != "BADFD").then(|| std::fs::File::open(&arg).expect("open failed"));
+                let fd = dir.as_ref().map_or(9999, |d| d.as_raw_fd());
                 let name = std::ffi::CString::new(std::env::args().nth(2).unwrap()).unwrap();
-                let rc = unsafe { mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o755) };
-                std::process::exit(if rc == 0 { 0 } else { 1 });
+                let rc = unsafe { mkdirat(fd, name.as_ptr(), 0o755) };
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(1);
+                std::process::exit(if rc == 0 { 0 } else { errno });
             }
             "#,
         )
         .unwrap();
-        let out = std::env::temp_dir().join(format!("mkdirat-probe-{}", std::process::id()));
+        let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mkdirat-probe");
         let status = Command::new("rustc")
-            .args(["--edition", "2021", "-O"])
+            .args(["--edition", "2024", "-O"])
             .arg("-o")
             .arg(&out)
             .arg(&src)
@@ -149,6 +153,18 @@ fn write_decision(project_root: &Path, text: &str) {
     std::fs::write(decision_file_path(project_root), text).unwrap();
 }
 
+/// Registers `project` the way `projects register` does (the shim only
+/// writes pending markers for registered projects).
+fn register_project(data_home: &Path, project: &Path) {
+    let dir = data_home.join("ghostvolumes");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(PROJECT_ROOTS_FILE_NAME),
+        format!("{}\n", project.display()),
+    )
+    .unwrap();
+}
+
 fn run_mkdir_with_shim(data_home: &Path, target: &Path) -> std::process::ExitStatus {
     Command::new("mkdir")
         .arg(target)
@@ -164,6 +180,27 @@ fn is_subvolume(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_dir() && m.ino() == 256)
         .unwrap_or(false)
+}
+
+#[test]
+fn the_shim_exports_mkdir_and_mkdirat() {
+    // Guards the `#[unsafe(no_mangle)]` exports themselves: without them
+    // every other test here would just see the real libc calls.
+    let Ok(out) = Command::new("nm")
+        .args(["-D", "--defined-only"])
+        .arg(compiled_shim())
+        .output()
+    else {
+        eprintln!("skipped: no `nm`");
+        return;
+    };
+    let symbols = String::from_utf8_lossy(&out.stdout);
+    for name in ["mkdir", "mkdirat"] {
+        assert!(
+            symbols.lines().any(|l| l.ends_with(&format!(" T {name}"))),
+            "{name} not exported:\n{symbols}"
+        );
+    }
 }
 
 #[test]
@@ -273,6 +310,135 @@ fn mkdirat_with_a_real_dirfd_resolves_correctly() {
 }
 
 #[test]
+fn a_bom_or_non_ascii_decision_file_never_aborts_the_host_process() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "\u{feff}+ node_modules\n\u{2192} note\n");
+
+    let target = scratch.path().join("node_modules");
+    assert!(run_mkdir_with_shim(data_home.path(), &target).success());
+    assert!(
+        is_subvolume(&target),
+        "the BOM-prefixed `+` line still applies"
+    );
+}
+
+#[test]
+fn a_symlinked_decision_file_is_never_appended_through() {
+    let scratch = btrfs_scratch_dir();
+    let outside = tempfile::tempdir().unwrap();
+    let bashrc = outside.path().join("bashrc");
+    std::fs::write(&bashrc, "# rc\n").unwrap();
+    std::os::unix::fs::symlink(&bashrc, decision_file_path(scratch.path())).unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+
+    let target = scratch.path().join("node_modules");
+    assert!(run_mkdir_with_shim(data_home.path(), &target).success());
+    assert!(target.is_dir() && !is_subvolume(&target));
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "# rc\n");
+}
+
+fn run_mkdir_in(data_home: &Path, cwd: &Path, target: &str) -> std::process::ExitStatus {
+    Command::new("mkdir")
+        .arg(target)
+        .current_dir(cwd)
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home)
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap()
+}
+
+#[test]
+fn a_symlinked_parent_is_decided_and_created_at_its_real_path() {
+    let scratch = btrfs_scratch_dir();
+    let root = scratch.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(&root, "node_modules")]);
+    // Anchored to the real location: only kernel resolution matches it.
+    write_decision(&root, "+ /real/node_modules\n");
+
+    assert!(run_mkdir_in(data_home.path(), &root, "link/node_modules").success());
+    assert!(is_subvolume(&root.join("real/node_modules")));
+}
+
+#[test]
+fn dot_dot_in_the_target_resolves_like_the_kernel() {
+    let scratch = btrfs_scratch_dir();
+    let root = scratch.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("a")).unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(&root, "node_modules")]);
+    write_decision(&root, "+ /node_modules\n");
+
+    assert!(run_mkdir_in(data_home.path(), &root, "a/../node_modules").success());
+    assert!(is_subvolume(&root.join("node_modules")));
+}
+
+#[test]
+fn dot_dot_through_a_symlink_follows_the_kernel_out_of_the_project() {
+    let scratch = btrfs_scratch_dir();
+    let root = scratch.path().canonicalize().unwrap();
+    let project = root.join("proj");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(outside.join("sub")).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::os::unix::fs::symlink(outside.join("sub"), project.join("link")).unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(&project, "node_modules")]);
+    write_decision(&project, "+ node_modules\n");
+
+    // Kernel: proj/link/.. is `outside`, which no root covers -> plain.
+    assert!(run_mkdir_in(data_home.path(), &project, "link/../node_modules").success());
+    assert!(outside.join("node_modules").is_dir());
+    assert!(!is_subvolume(&outside.join("node_modules")));
+    assert!(!project.join("node_modules").exists());
+}
+
+#[test]
+fn mkdirat_with_an_invalid_dirfd_fails_with_ebadf_instead_of_using_the_cwd() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), ".venv")]);
+    write_decision(scratch.path(), "+ .venv\n");
+
+    let status = Command::new(compiled_mkdirat_probe())
+        .args(["BADFD", ".venv"])
+        .current_dir(scratch.path())
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(9), "EBADF");
+    assert!(!scratch.path().join(".venv").exists());
+}
+
+#[test]
+fn a_deleted_cwd_passes_through_to_the_real_mkdir() {
+    let scratch = btrfs_scratch_dir();
+    let gone = scratch.path().join("gone");
+    std::fs::create_dir(&gone).unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "+ node_modules\n");
+
+    let status = Command::new("sh")
+        .args(["-c", "rmdir \"$PWD\" && exec mkdir node_modules"])
+        .current_dir(&gone)
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1), "real mkdir's ENOENT, not a crash");
+}
+
+#[test]
 fn denied_decision_is_never_converted() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
@@ -318,6 +484,7 @@ fn undecided_candidate_appends_a_pending_comment_to_the_project_decision_file() 
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    register_project(data_home.path(), scratch.path());
 
     let target = scratch.path().join("node_modules");
     assert!(run_mkdir_with_shim(data_home.path(), &target).success());
@@ -328,10 +495,24 @@ fn undecided_candidate_appends_a_pending_comment_to_the_project_decision_file() 
 }
 
 #[test]
+fn an_unregistered_project_gets_no_marker_at_the_volume_root() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+
+    let target = scratch.path().join("some/deep/proj/node_modules");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    assert!(run_mkdir_with_shim(data_home.path(), &target).success());
+    assert!(target.is_dir() && !is_subvolume(&target));
+    assert!(!decision_file_path(scratch.path()).exists());
+}
+
+#[test]
 fn undecided_candidate_does_not_duplicate_the_pending_comment_on_repeat_runs() {
     let scratch = btrfs_scratch_dir();
     let data_home = tempfile::tempdir().unwrap();
     write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    register_project(data_home.path(), scratch.path());
 
     let target = scratch.path().join("node_modules");
     run_mkdir_with_shim(data_home.path(), &target); // creates the plain dir
@@ -408,6 +589,118 @@ fn mkdir_on_an_already_existing_subvolume_passes_through_and_reports_eexist_norm
     // not silently "succeed" or panic.
     let status = run_mkdir_with_shim(data_home.path(), &target);
     assert!(!status.success());
+}
+
+/// Runs `python3 -c <code>` under the shim (exit status = the script's).
+fn run_python_with_shim(data_home: &Path, code: &str) -> std::process::ExitStatus {
+    Command::new("python3")
+        .args(["-I", "-c", code])
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home)
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap()
+}
+
+#[test]
+fn mkdir_on_an_existing_file_or_plain_dir_reports_eexist_not_success() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "build")]);
+    write_decision(scratch.path(), "+ build\n");
+    let (file, dir) = (scratch.path().join("a"), scratch.path().join("b"));
+    std::fs::create_dir_all(&file).unwrap();
+    std::fs::write(file.join("build"), "script").unwrap();
+    std::fs::create_dir_all(dir.join("build")).unwrap();
+
+    for target in [file.join("build"), dir.join("build")] {
+        let code = format!(
+            "import os,errno,sys\ntry: os.mkdir({:?})\nexcept FileExistsError: sys.exit(17)\nsys.exit(0)",
+            target.display().to_string()
+        );
+        assert_eq!(
+            run_python_with_shim(data_home.path(), &code).code(),
+            Some(17)
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(file.join("build")).unwrap(),
+        "script"
+    );
+    assert!(!is_subvolume(&dir.join("build")));
+}
+
+#[test]
+fn a_created_subvolume_honours_the_requested_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    // Same result as a real mkdir: `mode & ~umask`, sticky bit kept.
+    for (name, requested, expected) in [(".cache", 0o700, 0o700), ("build", 0o1777, 0o1755)] {
+        let scratch = btrfs_scratch_dir();
+        let data_home = tempfile::tempdir().unwrap();
+        write_cache(data_home.path(), &[(scratch.path(), name)]);
+        write_decision(scratch.path(), &format!("+ {name}\n"));
+
+        let target = scratch.path().join(name);
+        let code = format!(
+            "import os\nos.umask(0o022)\nos.mkdir({:?}, {requested:#o})",
+            target.display().to_string()
+        )
+        .replace("0o", "0o");
+        assert!(run_python_with_shim(data_home.path(), &code).success());
+        assert!(is_subvolume(&target));
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, expected, "{name}: {mode:o}");
+    }
+}
+
+#[test]
+fn a_host_reusing_low_fds_never_receives_log_lines() {
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    let victim = scratch.path().join("victim.dat");
+    let log_file = scratch.path().join("shim.log");
+    let target = scratch.path().join("node_modules"); // undecided -> Info log line
+    let code = format!(
+        "import os\nos.closerange(3, 1024)\nfd = os.open({:?}, os.O_WRONLY | os.O_CREAT)\n\
+         os.write(fd, b'APP\\n')\nos.mkdir({:?})\nos.close(fd)",
+        victim.display().to_string(),
+        target.display().to_string()
+    );
+    let status = Command::new("python3")
+        .args(["-I", "-c", &code])
+        .env("HOME", fake_home())
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("GHOSTVOLUMES_LOG_FILE", &log_file)
+        .env("LD_PRELOAD", compiled_shim())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "APP\n");
+    assert!(
+        std::fs::read_to_string(&log_file)
+            .unwrap()
+            .contains("undecided")
+    );
+}
+
+#[test]
+fn a_data_dir_owned_by_another_user_disables_interception() {
+    // Stands in for `sudo -E`: this process's euid doesn't own the data
+    // dir. Needs root to chown; unprivileged runs (CI) skip it.
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipped: needs root to chown the data dir");
+        return;
+    }
+    let scratch = btrfs_scratch_dir();
+    let data_home = tempfile::tempdir().unwrap();
+    write_cache(data_home.path(), &[(scratch.path(), "node_modules")]);
+    write_decision(scratch.path(), "+ node_modules\n");
+    std::os::unix::fs::chown(data_home.path().join("ghostvolumes"), Some(65534), None).unwrap();
+
+    let target = scratch.path().join("node_modules");
+    assert!(run_mkdir_with_shim(data_home.path(), &target).success());
+    assert!(target.is_dir() && !is_subvolume(&target));
 }
 
 #[test]
@@ -502,6 +795,10 @@ fn debug_mode_logs_every_decision_with_its_reason() {
     let log_text = std::fs::read_to_string(log_file.path()).unwrap();
     assert!(log_text.contains("-> ACCEPT (created subvolume)"));
     assert!(log_text.contains("-> SKIP (no cache match)"));
+    assert!(
+        !log_text.contains(&format!("{} -> ENTER", no_match.display())),
+        "an unwatched name must never reach path resolution"
+    );
 
     // `-> ENTER` is logged before `decide()` even runs (see
     // handle_intercept), so it tells apart "the shim was entered but

@@ -35,7 +35,7 @@ fn compiled_probe() -> &'static Path {
     PROBE.get_or_init(|| {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let src_path =
-            std::env::temp_dir().join(format!("btrfs-loopback-probe-{}.rs", std::process::id()));
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("btrfs-loopback-probe.rs");
         let source = format!(
             r#"
             include!("{manifest_dir}/shim/btrfs_core.rs");
@@ -89,9 +89,9 @@ fn compiled_probe() -> &'static Path {
         std::fs::write(&src_path, source).unwrap();
 
         let out_path =
-            std::env::temp_dir().join(format!("btrfs-loopback-probe-{}", std::process::id()));
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("btrfs-loopback-probe");
         let status = Command::new("rustc")
-            .args(["--edition", "2021", "-O"])
+            .args(["--edition", "2024", "-O"])
             .arg("-o")
             .arg(&out_path)
             .arg(&src_path)

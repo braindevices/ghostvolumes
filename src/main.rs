@@ -143,6 +143,11 @@ enum Command {
         /// or the project-roots list
         #[arg(long)]
         dry_run: bool,
+        /// Delete the `.<name>.ghostvolumes-convert-old.<time>` backup after a
+        /// successful swap instead of keeping it (config:
+        /// `delete-convert-backup = true`)
+        #[arg(long)]
+        delete_backup: bool,
     },
     /// Walk and resolve decisions like convert, but never convert
     /// anything - and hand-author decisions ahead of time
@@ -212,14 +217,40 @@ enum ProjectsAction {
     },
 }
 
-/// Resolves a raw CLI path argument to an absolute path before use —
-/// purely lexical (`std::path::absolute`, not `canonicalize`), so it
-/// works without the path existing yet. Every path argument must go
-/// through this so a relative argument never silently operates
-/// relative to whatever the current directory happens to be.
+/// Resolves a raw CLI path argument to the absolute, physical path the
+/// shim also sees (`getcwd()`-based): the deepest existing ancestor is
+/// canonicalized (symlinks and `..` resolved by the kernel, not
+/// lexically), and the not-yet-existing rest appended — it must be plain
+/// names, since `..` past a missing directory can't be resolved. Every
+/// path argument goes through this, so a relative argument never
+/// silently operates relative to whatever the cwd happens to be.
 #[cfg(target_os = "linux")]
 fn absolutize(path: &str) -> anyhow::Result<PathBuf> {
-    std::path::absolute(path).map_err(|e| anyhow::anyhow!("could not resolve path {path:?}: {e}"))
+    use std::path::Component;
+    let abs = std::path::absolute(path)
+        .map_err(|e| anyhow::anyhow!("could not resolve path {path:?}: {e}"))?;
+    let components: Vec<Component> = abs.components().collect();
+    for split in (1..=components.len()).rev() {
+        let existing: PathBuf = components[..split].iter().collect();
+        match existing.canonicalize() {
+            Ok(real) => {
+                let rest = &components[split..];
+                if rest.iter().any(|c| !matches!(c, Component::Normal(_))) {
+                    anyhow::bail!(
+                        "could not resolve path {path:?}: `..` after a missing directory"
+                    );
+                }
+                return Ok(rest.iter().fold(real, |p, c| p.join(c)));
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => anyhow::bail!("could not resolve path {path:?}: {e}"),
+        }
+    }
+    Ok(abs)
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -242,6 +273,26 @@ mod absolutize_tests {
         // concurrently in this same process.
         let expected = std::env::current_dir().unwrap().join("some-subdir");
         assert_eq!(absolutize("some-subdir").unwrap(), expected);
+    }
+
+    #[test]
+    fn symlinks_and_dot_dot_resolve_like_the_kernel_not_lexically() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real/a")).unwrap();
+        std::fs::create_dir(root.join("other")).unwrap();
+        std::os::unix::fs::symlink("../real", root.join("other/link")).unwrap();
+        let abs = |p: &str| absolutize(root.join(p).to_str().unwrap()).unwrap();
+        assert_eq!(abs("other/link/a"), root.join("real/a"));
+        // Lexically this would be `other/link`; the kernel says `real`.
+        assert_eq!(abs("other/link/a/.."), root.join("real"));
+        assert_eq!(abs("other/link/new/deeper"), root.join("real/new/deeper"));
+    }
+
+    #[test]
+    fn dot_dot_after_a_missing_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(absolutize(dir.path().join("missing/../x").to_str().unwrap()).is_err());
     }
 }
 
@@ -343,6 +394,7 @@ fn main() -> anyhow::Result<()> {
             max_depth,
             create,
             dry_run,
+            delete_backup,
         } => {
             let config_dir = xdg::config_dir()?;
             let data_dir = xdg::data_dir()?;
@@ -362,6 +414,7 @@ fn main() -> anyhow::Result<()> {
                 &project_roots_path,
                 &data_dir,
                 dry_run,
+                delete_backup,
             )
         }
         Command::Decide {
@@ -400,7 +453,11 @@ fn main() -> anyhow::Result<()> {
                     Ok(())
                 }
                 ProjectsAction::Register { path } => {
-                    let path = absolutize(&path)?.display().to_string();
+                    let path = absolutize(&path)?;
+                    if !path.is_dir() {
+                        anyhow::bail!("{} is not an existing directory", path.display());
+                    }
+                    let path = path.display().to_string();
                     projects::register(&list_path, &path)
                 }
                 ProjectsAction::Unregister { path } => {
@@ -417,12 +474,30 @@ fn main() -> anyhow::Result<()> {
             let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
             let project_roots_path = data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME);
             let preload_so_path = data_dir.join(filenames::SHIM_FILE_NAME);
+            // Refuse rather than warn: an old shim may disagree with this
+            // CLI's file formats and lock paths, and lacks its fixes.
+            if data_dir.exists() && !init::data_dir_owned_by_euid(&data_dir) {
+                anyhow::bail!(
+                    "{} is owned by another user (e.g. created via `sudo -E`), so the shim would \
+                     ignore every call - fix its ownership",
+                    data_dir.display()
+                );
+            }
+            if !init::shim_is_current(&data_dir) {
+                anyhow::bail!(
+                    "the installed shim {} is missing or doesn't match this ghostvolumes binary ({}) - run `ghostvolumes init`",
+                    preload_so_path.display(),
+                    std::env::current_exe()
+                        .map_or_else(|_| "?".into(), |p| p.display().to_string())
+                );
+            }
             let code =
                 intercept::intercept(&cmd, &preload_so_path, &cache_path, &project_roots_path)?;
             std::process::exit(code);
         }
         Command::ShellInit { shell } => {
             let data_dir = xdg::data_dir()?;
+            init::warn_if_shim_stale(&data_dir);
             print!("{}", shellinit::shell_init(&shell, &data_dir)?);
             Ok(())
         }

@@ -17,15 +17,16 @@ $ cat .ghostvolumes-decisions
 $ rm -rf node_modules && ghostvolumes intercept -- npm install
 # node_modules is now a real BTRFS subvolume - no prompt, no output
 
-$ mkdir build && ghostvolumes intercept -- true
+$ ghostvolumes intercept -- mkdir build
 $ cat .ghostvolumes-decisions
 + node_modules
-? build
+? /build
 # undecided: left as a plain directory, a "?" marker appended for later review
 ```
 
 ## Notes
 
+- `?` markers are only written into a **registered** project's decision file (`convert` registers it); elsewhere an undecided directory is just logged and left plain.
 - Runs inside arbitrary subprocess trees with no guaranteed terminal, so it can never prompt — see [decide.md](decide.md) or [convert.md](convert.md) to actually resolve a `?` marker.
 - Always logs critical events (a subvolume created, an undecided candidate skipped, an unexpected error) to `~/.local/share/ghostvolumes/shim.log` — never to stdout/stderr, since it runs inside a host process. See the README's [Debugging](../README.md#debugging) section for verbosity levels.
 - Don't `eval` its `LD_PRELOAD` value into your shell rc file — see the [FAQ](FAQ.md#why-not-just-export-ld_preload-globally) for why.

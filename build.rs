@@ -76,6 +76,7 @@ fn main() {
     for file in [
         "preload.rs",
         "cache_core.rs",
+        "debug_core.rs",
         "decision_core.rs",
         "filenames_core.rs",
         "lock_core.rs",
@@ -89,10 +90,12 @@ fn main() {
     let shim_src = PathBuf::from(&manifest_dir).join("shim/preload.rs");
     let shim_so = PathBuf::from(&out_dir).join(SHIM_FILE_NAME);
 
-    let mut cmd = Command::new("rustc");
+    // Cargo's own compiler (honours rustup overrides/toolchain files and
+    // wrappers), not whatever `rustc` happens to be first on PATH.
+    let mut cmd = Command::new(env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()));
     cmd.args([
         "--edition",
-        "2021",
+        "2024",
         "--crate-type",
         "cdylib",
         "-O",

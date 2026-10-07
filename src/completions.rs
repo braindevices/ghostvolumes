@@ -61,7 +61,9 @@ pub fn disabled_roots(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
 /// own `<path>` argument, since a completer for one argument can't see
 /// another argument's already-typed value.
 fn pending_patterns_in(dir: &Path, current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
-    let Ok(text) = std::fs::read_to_string(dir.join(crate::filenames::DECISION_FILE_NAME)) else {
+    let Some(text) =
+        crate::decision::read_regular_file(&dir.join(crate::filenames::DECISION_FILE_NAME))
+    else {
         return Vec::new();
     };
     text.lines()

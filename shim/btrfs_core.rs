@@ -11,9 +11,7 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 
-// Edition 2024 requires `unsafe extern` blocks; this syntax is also
-// accepted (not required) on the shim's own `--edition 2021`
-// compilation, so one spelling works for both contexts.
+// Edition 2024 (both the CLI crate and the shim) requires `unsafe extern`.
 unsafe extern "C" {
     // Variadic like libc's; rustc rejects mismatched runtime symbols.
     fn ioctl(fd: std::ffi::c_int, request: std::ffi::c_ulong, ...) -> std::ffi::c_int;
@@ -47,14 +45,10 @@ pub fn is_subvolume(path: &std::path::Path) -> std::io::Result<bool> {
 }
 
 /// Creates a new subvolume named `name` directly inside `parent`
-/// (which must already exist) via `BTRFS_IOC_SUBVOL_CREATE`.
+/// (which must already exist) via `BTRFS_IOC_SUBVOL_CREATE`. CLI-only;
+/// the shim uses `create_subvolume_in` on the directory it resolved.
+#[allow(dead_code)]
 pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result<()> {
-    if name.len() > BTRFS_PATH_NAME_MAX {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("subvolume name too long: {name}"),
-        ));
-    }
     // Stands in for O_DIRECTORY: a read-only open of a FIFO parent would
     // block the host process. `std` opens with O_CLOEXEC and closes on
     // drop; no hand-declared `open` (rustc rejects one that isn't
@@ -62,8 +56,19 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
     if !std::fs::metadata(parent)?.is_dir() {
         return Err(std::io::ErrorKind::NotADirectory.into());
     }
-    let parent_dir = std::fs::File::open(parent)?;
+    create_subvolume_in(&std::fs::File::open(parent)?, name)
+}
 
+/// `create_subvolume` on an already-open parent directory — the shim
+/// creates in exactly the directory it resolved and decided on, so a
+/// path component swapped in between can't redirect it.
+pub fn create_subvolume_in(parent_dir: &std::fs::File, name: &str) -> std::io::Result<()> {
+    if name.len() > BTRFS_PATH_NAME_MAX {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("subvolume name too long: {name}"),
+        ));
+    }
     let mut args = BtrfsIoctlVolArgs {
         fd: 0,
         name: [0u8; BTRFS_PATH_NAME_MAX + 1],

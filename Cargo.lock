@@ -293,6 +293,7 @@ dependencies = [
  "libc",
  "predicates",
  "serde",
+ "shlex",
  "tempfile",
  "toml",
  "vergen-gitcl",

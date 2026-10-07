@@ -15,10 +15,11 @@ use std::ffi::CStr;
 use std::io::Write;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn geteuid() -> u32;
 }
 
 const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
@@ -28,6 +29,7 @@ type MkdirFn = unsafe extern "C" fn(*const c_char, u32) -> c_int;
 type MkdiratFn = unsafe extern "C" fn(c_int, *const c_char, u32) -> c_int;
 
 static CACHE_ROWS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+static WATCHED_NAMES: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
 static PROJECT_ROOTS: OnceLock<Vec<String>> = OnceLock::new();
 static REAL_MKDIR: OnceLock<usize> = OnceLock::new();
 static REAL_MKDIRAT: OnceLock<usize> = OnceLock::new();
@@ -98,11 +100,11 @@ fn walkup_boundary(rows: &[(String, String)], target: &Path) -> PathBuf {
 }
 
 fn read_decision_file(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    decision_core::read_regular_file(path)
 }
 
 struct LogContext {
-    file: Option<Mutex<std::fs::File>>,
+    path: Option<PathBuf>,
     verbosity: debug_core::Verbosity,
 }
 
@@ -113,22 +115,12 @@ struct LogContext {
 fn load_log_context() -> LogContext {
     let verbosity = debug_core::configured_verbosity();
 
-    let log_path = std::env::var("GHOSTVOLUMES_LOG_FILE")
+    let path = std::env::var("GHOSTVOLUMES_LOG_FILE")
         .ok()
         .map(PathBuf::from)
         .or_else(|| resolved_data_dir().map(|dir| dir.join(filenames_core::SHIM_LOG_FILE_NAME)));
 
-    let file = log_path
-        .and_then(|path| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-        })
-        .map(Mutex::new);
-
-    LogContext { file, verbosity }
+    LogContext { path, verbosity }
 }
 
 /// `GHOSTVOLUMES_AUTO_YES` (§4): any value other than empty/`0` bypasses
@@ -150,16 +142,24 @@ fn log_ctx() -> &'static LogContext {
 /// prints to stdout/stderr — the shim runs injected into arbitrary host
 /// processes, and writing to their standard streams risks corrupting a
 /// TUI or polluting output the host process doesn't expect (§8.5).
+///
+/// Opened per line, never held: a host that closes all its fds and
+/// reuses the number (daemonizers, `closefrom`) would otherwise receive
+/// our log lines in its own file, and a held lock wouldn't be fork-safe.
+/// Only Info events (rare) and opt-in Debug reach here.
 fn log_line(level: debug_core::Verbosity, msg: &str) {
-    let Some(file) = &log_ctx().file else {
+    let Some(path) = &log_ctx().path else {
         return;
     };
-    let Ok(mut file) = file.lock() else {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
         return;
     };
     // Single write_all call (not writeln!'s multi-piece writes) so a line
-    // stays atomic across concurrent shim processes on an O_APPEND file;
-    // the Mutex above only serializes threads within this process.
+    // stays atomic across concurrent writers on an O_APPEND file.
     let line = format!("{}\n", debug_core::format_line(level, msg));
     let _ = file.write_all(line.as_bytes());
 }
@@ -189,37 +189,92 @@ extern "C" fn init_shim() {
 // call - same mechanism as C's __attribute__((constructor)), hand-written
 // since crate-based helpers like `ctor` aren't available (plan §8.1).
 #[used]
-#[link_section = ".init_array"]
+#[unsafe(link_section = ".init_array")]
 static INIT_ARRAY: extern "C" fn() = init_shim;
 
-fn cwd() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+/// Every name any `compiled.tsv` row watches — the syscall-free first
+/// filter, so an unwatched `mkdir` costs nothing beyond a set lookup.
+fn watched_names() -> &'static std::collections::HashSet<String> {
+    WATCHED_NAMES.get_or_init(|| {
+        let rows = CACHE_ROWS.get_or_init(load_cache);
+        rows.iter().map(|(_, name)| name.clone()).collect()
+    })
 }
 
-/// Resolves `mkdirat`'s dirfd to a path via `/proc/self/fd/<fd>` - the
-/// only portable way to recover a path from a bare fd without extra
-/// crates (plan §5 point 3).
-fn dirfd_path(dirfd: c_int) -> PathBuf {
-    if dirfd == AT_FDCWD {
-        return cwd();
-    }
-    std::fs::read_link(format!("/proc/self/fd/{dirfd}")).unwrap_or_else(|_| cwd())
+fn data_dir_owned_by_euid() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    resolved_data_dir()
+        .and_then(|dir| std::fs::metadata(dir).ok())
+        .is_some_and(|meta| meta.uid() == unsafe { geteuid() })
 }
 
-/// Resolves a raw C string path argument to an absolute `PathBuf`.
-/// `base` is a closure so the cwd/dirfd syscall only happens when the
-/// path actually turns out to be relative.
-fn resolve_path(raw: *const c_char, base: impl FnOnce() -> PathBuf) -> Option<PathBuf> {
+/// An intercepted `mkdir` target, resolved by the kernel rather than by
+/// path text: its parent directory opened, and the parent's real path
+/// read back from `/proc/self/fd` (symlinks and `..` already resolved).
+/// Deciding and creating both use this one open directory, so a path
+/// component swapped in between can't redirect the creation.
+struct Target {
+    parent: std::fs::File,
+    name: String,
+    /// `<real parent>/<name>` — what decisions and boundaries match on.
+    path: PathBuf,
+}
+
+/// Resolves `raw` (relative to `dirfd`, or the cwd for `None`/
+/// `AT_FDCWD`) into a `Target`, or `None` to pass the call through:
+/// null/non-UTF-8 path, a last component that is empty/`.`/`..` or not
+/// a watched name, a parent that isn't an openable directory (bad
+/// dirfd, missing, FIFO, unreadable), no `/proc`, or a deleted parent.
+/// A successful `mkdir`'s last component is never `.`/`..`, so the real
+/// parent plus `name` is the real target.
+fn resolve_target(syscall: &str, dirfd: Option<c_int>, raw: *const c_char) -> Option<Target> {
+    use std::os::fd::AsRawFd;
     if raw.is_null() {
         return None;
     }
-    let s = unsafe { CStr::from_ptr(raw) }.to_str().ok()?;
-    let p = Path::new(s);
-    if p.is_absolute() {
-        Some(p.to_path_buf())
-    } else {
-        Some(base().join(p))
+    let raw = unsafe { CStr::from_ptr(raw) }.to_str().ok()?;
+    let trimmed = raw.trim_end_matches('/');
+    let (parent_raw, name) = match trimmed.rfind('/') {
+        Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
+        None => ("", trimmed),
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
     }
+    if !watched_names().contains(name) {
+        log_debug(|| format!("{syscall} {raw} -> SKIP (no cache match)"));
+        return None;
+    }
+    // Another user's process with this user's HOME (`sudo -E`, a root
+    // shell keeping HOME) would leave subvolumes, markers and locks owned
+    // by the wrong user in this tree. Not a plain `euid == 0` check:
+    // root-only setups (containers) own their data dir and are fine.
+    if !data_dir_owned_by_euid() {
+        log_debug(|| format!("{syscall} {raw} -> SKIP (data dir owned by another user)"));
+        return None;
+    }
+    let parent_path = match (parent_raw, dirfd) {
+        ("", _) if trimmed.starts_with('/') => PathBuf::from("/"),
+        (p, _) if p.starts_with('/') => PathBuf::from(p),
+        (p, Some(fd)) if fd != AT_FDCWD => PathBuf::from(format!("/proc/self/fd/{fd}/{p}")),
+        ("", _) => PathBuf::from("."),
+        (p, _) => PathBuf::from(p),
+    };
+    // Directory check before opening: a read-only open of a FIFO blocks.
+    if !std::fs::metadata(&parent_path).ok()?.is_dir() {
+        return None;
+    }
+    let parent = std::fs::File::open(&parent_path).ok()?;
+    let real_parent = std::fs::read_link(format!("/proc/self/fd/{}", parent.as_raw_fd())).ok()?;
+    let real_parent_str = real_parent.to_str()?;
+    if !real_parent.is_absolute() || real_parent_str.ends_with(" (deleted)") {
+        return None;
+    }
+    Some(Target {
+        path: real_parent.join(name),
+        name: name.to_string(),
+        parent,
+    })
 }
 
 /// The reason behind an interception decision (ai-work/tasks/decision-model.plan.md
@@ -302,16 +357,12 @@ fn append_pending_marker(boundary: &Path, target: &Path) {
         return;
     }
     let file_path = boundary.join(filenames_core::DECISION_FILE_NAME);
-    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
+    let existing = decision_core::read_regular_file(&file_path).unwrap_or_default();
     if !decision_core::needs_pending_marker(&existing, &pattern) {
         return;
     }
     let line = format!("{}\n", decision_core::pending_marker_line(&pattern));
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)
-    {
+    if let Ok(mut file) = decision_core::open_regular_file(&file_path, true) {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -321,19 +372,19 @@ fn append_pending_marker(boundary: &Path, target: &Path) {
 /// this project's lock, for `handle_intercept`'s logging.
 enum CreateResult {
     Created,
+    /// Something already has that name: the real syscall reports the
+    /// correct `EEXIST` (or creates nothing), never a fake success.
+    Exists,
     LockContended,
     Failed,
 }
 
-/// Attempts `BTRFS_IOC_SUBVOL_CREATE` for `target`, tolerating `EEXIST`.
+/// Attempts `BTRFS_IOC_SUBVOL_CREATE` for `target`, then applies the
+/// caller's `mode` (the ioctl always creates `0777 & ~umask`).
 /// Guarded by a non-blocking `try_lock()` on `boundary`'s per-project
 /// lock file, coordinating with `convert`'s own lock; must not block
 /// (falls through to the real syscall on contention).
-fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
-    let (Some(parent), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str()))
-    else {
-        return CreateResult::Failed;
-    };
+fn try_create_subvolume(target: &Target, boundary: &Path, mode: u32) -> CreateResult {
     let Some(data_dir) = resolved_data_dir() else {
         return CreateResult::Failed;
     };
@@ -345,9 +396,32 @@ fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
     if lock_file.try_lock().is_err() {
         return CreateResult::LockContended;
     }
-    match btrfs_core::create_subvolume(parent, name) {
-        Ok(()) => CreateResult::Created,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => CreateResult::Created,
+    match btrfs_core::create_subvolume_in(&target.parent, &target.name) {
+        Ok(()) => {
+            // `mkdir` semantics: `mode & ~umask`. The new dir already
+            // carries `0777 & ~umask`, so intersecting gives exactly that.
+            use std::os::unix::fs::PermissionsExt;
+            // chmod follows symlinks; the check on the opened fd (a
+            // directory with inode 256, i.e. a subvolume root) is the guard
+            // against one swapped in at the path, and the chmod goes through
+            // that same fd. Re-resolving the path gives an attacker nothing:
+            // redirecting it needs write access to an ancestor, which already
+            // lets them replace the whole project (documents/security.md).
+            // Keeps an inherited setgid and a requested sticky bit, as a
+            // real `mkdir` would.
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(dir) = std::fs::File::open(&target.path)
+                && let Ok(meta) = dir.metadata()
+                && meta.is_dir()
+                && meta.ino() == 256
+            {
+                let cur = meta.permissions().mode();
+                let wanted = (cur & mode & 0o777) | (mode & 0o1000) | (cur & 0o2000);
+                let _ = dir.set_permissions(std::fs::Permissions::from_mode(wanted));
+            }
+            CreateResult::Created
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => CreateResult::Exists,
         Err(_) => CreateResult::Failed,
     }
 }
@@ -356,13 +430,14 @@ fn try_create_subvolume(target: &Path, boundary: &Path) -> CreateResult {
 /// call, logging the outcome (§8.5), and reports whether it was
 /// handled (`true`) or the caller should fall through to the real
 /// syscall (`false`).
-fn handle_intercept(syscall: &str, target: &Path) -> bool {
+fn handle_intercept(syscall: &str, resolved: &Target, mode: u32) -> bool {
+    let target = resolved.path.as_path();
     // Logged before `decide()` runs, so debug output can tell "entered
     // but decided X" apart from "never entered" (some `mkdir`
     // implementations skip the syscall entirely via a pre-check `stat`).
     log_debug(|| format!("{syscall} {} -> ENTER", target.display()));
     match decide(target) {
-        Decision::Accept(boundary) => match try_create_subvolume(target, &boundary) {
+        Decision::Accept(boundary) => match try_create_subvolume(resolved, &boundary, mode) {
             CreateResult::Created => {
                 log_important(format!("{syscall}: created subvolume {}", target.display()));
                 log_debug(|| {
@@ -372,6 +447,10 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
                     )
                 });
                 true
+            }
+            CreateResult::Exists => {
+                log_debug(|| format!("{syscall} {} -> SKIP (already exists)", target.display()));
+                false
             }
             CreateResult::LockContended => {
                 log_debug(|| {
@@ -411,7 +490,17 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
                 target.display()
             ));
             log_debug(|| format!("{syscall} {} -> SKIP (undecided)", target.display()));
-            append_pending_marker(&boundary, target);
+            // Only a registered project gets a marker: otherwise the
+            // boundary is a whole volume root (e.g. /home), whose decision
+            // file the user never asked for — and `convert` would then
+            // trip over it as an orphan.
+            let registered = PROJECT_ROOTS
+                .get_or_init(load_project_roots)
+                .iter()
+                .any(|root| Path::new(root) == boundary);
+            if registered {
+                append_pending_marker(&boundary, target);
+            }
             false
         }
         Decision::NoCacheMatch => {
@@ -421,20 +510,20 @@ fn handle_intercept(syscall: &str, target: &Path) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mkdir(path: *const c_char, mode: u32) -> c_int {
-    if let Some(target) = resolve_path(path, cwd) {
-        if handle_intercept("mkdir", &target) {
+    if let Some(target) = resolve_target("mkdir", None, path) {
+        if handle_intercept("mkdir", &target, mode) {
             return 0;
         }
     }
     unsafe { real_mkdir()(path, mode) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
-    if let Some(target) = resolve_path(path, || dirfd_path(dirfd)) {
-        if handle_intercept("mkdirat", &target) {
+    if let Some(target) = resolve_target("mkdirat", Some(dirfd), path) {
+        if handle_intercept("mkdirat", &target, mode) {
             return 0;
         }
     }

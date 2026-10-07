@@ -25,8 +25,23 @@ pub struct DiscoveredMatch {
     pub kind: MatchKind,
 }
 
+/// `s` as one shell word, safe to paste (a directory named `$(…)` can't
+/// run anything). `shlex::try_quote` only — the deprecated `quote` is
+/// RUSTSEC-2024-0006. Callers never pass control characters (see
+/// `printable`), which also rules out its only error, NUL.
+fn shell_quote(s: &str) -> String {
+    shlex::try_quote(s).map_or_else(|_| format!("{s:?}"), |q| q.into_owned())
+}
+
+/// Suggested commands are pasted from a terminal, so a name with control
+/// characters (escape sequences could rewrite what's displayed) gets no
+/// runnable command at all — only an escaped mention.
+fn printable(s: &str) -> bool {
+    !s.chars().any(char::is_control)
+}
+
 fn read_decision_file(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    crate::decision::read_regular_file(path)
 }
 
 /// Classifies one candidate given what `decision::resolve` found (`None`
@@ -282,25 +297,41 @@ fn fold_nested_child(
 pub fn format_report(suggestions: &[ProjectSuggestion]) -> String {
     let mut out = String::new();
     for s in suggestions {
+        let path_text = s.path.display().to_string();
+        let names = [
+            &s.approved,
+            &s.unwatched_subvolumes,
+            &s.not_yet_converted,
+            &s.denied_but_exists,
+            &s.approved_not_converted,
+        ];
+        if !printable(&path_text) || names.iter().flat_map(|n| n.iter()).any(|n| !printable(n)) {
+            out.push_str(&format!(
+                "{path_text:?}\n  contains a name with control characters - rename it before \
+                 running ghostvolumes on it (no commands suggested)\n\n"
+            ));
+            continue;
+        }
         out.push_str(&format!("{}\n", s.path.display()));
         if !s.approved.is_empty() {
             out.push_str("  already a subvolume, needs a decision:\n");
             let flags: String = s
                 .approved
                 .iter()
-                .map(|name| format!(" --add {name}"))
+                .map(|name| format!(" --add {}", shell_quote(name)))
                 .collect();
             out.push_str(&format!(
                 "    ghostvolumes decide {}{flags}\n",
-                s.path.display()
+                shell_quote(&s.path.display().to_string())
             ));
         }
         if !s.unwatched_subvolumes.is_empty() {
             out.push_str("  already a subvolume, but not a watched name - needs clarification:\n");
             for name in &s.unwatched_subvolumes {
                 out.push_str(&format!(
-                    "    ghostvolumes decide {} --add {name}   # or --deny {name}\n",
-                    s.path.display()
+                    "    ghostvolumes decide {} --add {q}   # or --deny {q}\n",
+                    shell_quote(&s.path.display().to_string()),
+                    q = shell_quote(name)
                 ));
             }
         }
@@ -318,17 +349,17 @@ pub fn format_report(suggestions: &[ProjectSuggestion]) -> String {
             let flags: String = s
                 .denied_but_exists
                 .iter()
-                .map(|name| format!(" --add {name}"))
+                .map(|name| format!(" --add {}", shell_quote(name)))
                 .collect();
             out.push_str(&format!(
                 "    to override the recorded '-': ghostvolumes decide {}{flags}\n",
-                s.path.display()
+                shell_quote(&s.path.display().to_string())
             ));
         }
         if !s.approved_not_converted.is_empty() {
             out.push_str(&format!(
                 "  approved ('+') but not yet converted - run to materialize: ghostvolumes convert {}   # {}\n",
-                s.path.display(),
+                shell_quote(&s.path.display().to_string()),
                 s.approved_not_converted.join(", ")
             ));
         }
@@ -339,6 +370,43 @@ pub fn format_report(suggestions: &[ProjectSuggestion]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_quote_output_is_pinned_and_round_trips_through_sh() {
+        // Pinned so a shlex upgrade can't silently change what we print.
+        let cases = [
+            ("/home/u/proj-1/node_modules", "/home/u/proj-1/node_modules"),
+            ("/p/$(rm -rf ~)", "'/p/$(rm -rf ~)'"),
+            ("a b", "'a b'"),
+            ("{x}", "'{x}'"),
+            ("\u{a0}", "'\u{a0}'"),
+            ("", "''"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(shell_quote(input), expected, "{input:?}");
+        }
+        for input in ["it's", "/p/$(rm -rf ~)", "a b", "\u{a0}", "x\"y"] {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &format!("printf %s {}", shell_quote(input))])
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn names_with_control_characters_get_no_runnable_command() {
+        let report = format_report(&[ProjectSuggestion {
+            path: PathBuf::from("/p/evil\x1b]0;x\x07"),
+            approved: vec!["node_modules".into()],
+            unwatched_subvolumes: vec![],
+            not_yet_converted: vec![],
+            denied_but_exists: vec![],
+            approved_not_converted: vec![],
+        }]);
+        assert!(!report.contains("ghostvolumes decide"), "{report}");
+        assert!(!report.contains('\x1b'), "{report}");
+    }
+
     use super::*;
     use crate::test_support::btrfs_scratch_dir;
 

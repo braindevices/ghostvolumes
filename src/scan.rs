@@ -21,8 +21,20 @@ fn is_snapshot_managed(mountpoint: &Path) -> bool {
 /// Auto-detected roots: BTRFS mountpoints (from `mountinfo_text`) that
 /// are Snapper-managed. Sorted for deterministic output.
 fn detect_roots_from_text(mountinfo_text: &str) -> Vec<String> {
+    // A mountpoint's last component can be a disk label someone else chose
+    // (`/run/media/<user>/<LABEL>`): one with a newline or tab could inject
+    // a `compiled.tsv` row, so it's never saved.
     let mut roots: Vec<String> = mountinfo::btrfs_mountpoints(mountinfo_text)
         .into_iter()
+        .filter(|mountpoint| {
+            let ok = crate::decision::representable_path(mountpoint);
+            if !ok {
+                eprintln!(
+                    "warning: skipping mountpoint {mountpoint:?}: not representable in compiled.tsv"
+                );
+            }
+            ok
+        })
         .filter(|mountpoint| is_snapshot_managed(Path::new(mountpoint)))
         .collect();
     roots.sort();
@@ -43,6 +55,7 @@ pub fn save_roots(config_dir: &Path, roots: &[String]) -> anyhow::Result<()> {
     let file = RootsFile {
         default_watches: None,
         default_ignore: None,
+        delete_convert_backup: None,
         roots: roots
             .iter()
             .map(|r| (r.clone(), RawRootEntry::default()))
@@ -63,6 +76,24 @@ mod tests {
     use super::*;
     use crate::test_support::btrfs_scratch_dir;
     use tempfile::tempdir;
+
+    #[test]
+    fn a_mountpoint_label_with_a_newline_is_never_a_root() {
+        // A real, Snapper-shaped mount whose label ends in "\n/x": without
+        // the filter it would be detected and inject a compiled.tsv row.
+        let dir = btrfs_scratch_dir();
+        let evil = dir.path().join("label\n/x");
+        std::fs::create_dir_all(&evil).unwrap();
+        btrfs::create_subvolume(&evil, ".snapshots").unwrap();
+        let escaped = evil.display().to_string().replace('\n', "\\012");
+        let text =
+            format!("36 35 0:31 / {escaped} rw,relatime shared:1 - btrfs /dev/sda2 rw,ssd\n");
+        assert_eq!(
+            mountinfo::btrfs_mountpoints(&text),
+            vec![evil.display().to_string()]
+        );
+        assert!(detect_roots_from_text(&text).is_empty());
+    }
 
     fn fake_mountinfo_line(mountpoint: &Path) -> String {
         format!(

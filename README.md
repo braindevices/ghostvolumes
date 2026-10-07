@@ -31,26 +31,26 @@ Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, .
 - **Near-zero overhead** — an `LD_PRELOAD` hook intercepts `mkdir`/`mkdirat` directly, no polling or file-watching.
 - **Explicit, reviewable decisions** — every conversion is backed by a committed `+`/`-` record, never a silent guess.
 - **VCS-agnostic** — works the same whether or not a project uses git.
-- **Built for your machine** — the shim compiles locally at install time, so it always matches your host's libc.
+- **Built for your machine** — the shim is compiled locally by `cargo install`, so it always matches your host's libc.
 
 ## Install
 
 ```bash
-cargo install --git https://github.com/braindevices/ghostvolumes
-ghostvolumes init                # compile + install the LD_PRELOAD shim, write default config
+cargo install --locked --git https://github.com/braindevices/ghostvolumes --tag vX.Y.Z
+ghostvolumes init                # install the LD_PRELOAD shim, write default config
 ghostvolumes roots scan --save   # detect your snapshot-managed BTRFS roots
 ```
 
 That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](documents/FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](documents/FAQ.md) for the recommended workflow.
 
-Add `--tag vX.Y.Z` (see [Releases](https://github.com/braindevices/ghostvolumes/releases)) to pin a specific version instead of building off the tip of `main`. Either way, `cargo install --git` clones the whole repository, including this project's own `ai-work/` planning notes.
+Pick `vX.Y.Z` from [Releases](https://github.com/braindevices/ghostvolumes/releases); drop `--tag` to build the tip of `main` instead. `--locked` builds with the committed `Cargo.lock` rather than re-resolving dependencies. Either way, `cargo install --git` clones the whole repository, including this project's own `ai-work/` planning notes.
 
 Prefer not to have those included? Download a release's source archive instead (`ai-work/` is excluded there — see its `.gitattributes`) and install from the extracted directory:
 
 ```bash
 curl -L -o ghostvolumes.tar.gz https://github.com/braindevices/ghostvolumes/archive/refs/tags/vX.Y.Z.tar.gz
 tar xf ghostvolumes.tar.gz
-cargo install --path ghostvolumes-X.Y.Z
+cargo install --locked --path ghostvolumes-X.Y.Z
 ```
 
 ## Shell completions
@@ -78,7 +78,7 @@ $ ghostvolumes intercept -- npm install    # from now on: automatic, no prompt
 - **[`decide <path>`](documents/decide.md)** — the same walk as `convert`, but only ever records decisions, never touches the filesystem.
 - **[`discover [path]`](documents/discover.md)** — a read-only survey of an arbitrary path, suggesting `decide`/`convert` commands to run rather than acting itself.
 
-Shared reference: [decision-files.md](documents/decision-files.md) (the `.ghostvolumes-decisions` syntax), [project-roots.md](documents/project-roots.md) (why projects can't nest), and [files.md](documents/files.md) (every file GhostVolumes reads or writes, annotated). [design.md](documents/design.md) has the full rationale, and [FAQ.md](documents/FAQ.md) has common workflow questions.
+Shared reference: [decision-files.md](documents/decision-files.md) (the `.ghostvolumes-decisions` syntax), [project-roots.md](documents/project-roots.md) (why projects can't nest), and [files.md](documents/files.md) (every file GhostVolumes reads or writes, annotated). [design.md](documents/design.md) has the full rationale, [security.md](documents/security.md) the threat model and its defenses, and [FAQ.md](documents/FAQ.md) has common workflow questions.
 
 ## Commands
 
@@ -159,9 +159,11 @@ GHOSTVOLUMES_AUTO_YES=1 ghostvolumes intercept -- npm install              # ski
 ## Upgrading
 
 ```bash
-cargo install --git https://github.com/braindevices/ghostvolumes --force
+cargo install --locked --git https://github.com/braindevices/ghostvolumes --tag vX.Y.Z --force
 ghostvolumes init   # re-installs the shim to match the new build
 ```
+
+`cargo install` only replaces the binary; the shim `LD_PRELOAD` loads is only updated by `init`, so `intercept` refuses to run until you do. `init` alone completes the upgrade: it swaps the shim atomically (running sessions keep the old one until restarted) and re-runs `reload` so existing config is recompiled for the new version.
 
 ## Known limitations
 

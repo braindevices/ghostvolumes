@@ -2,7 +2,10 @@
 
 Registers `<path>` as a project, then walks it asking about each
 undecided candidate — converting and recording a `+`/`-` decision as
-it goes. `<path>` itself is never converted.
+it goes. `<path>` itself is never converted, and neither is anything
+outside it: a decision-file pattern with `.`/`..` components is
+ignored, and a target reached through a symlink, or that isn't a real
+directory, is refused.
 
 ```bash
 ghostvolumes convert <path> [--create <relative-path>]... [--max-depth N] [--dry-run]

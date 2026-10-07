@@ -26,6 +26,8 @@ pub struct MergedConfig {
     /// The fully-merged `default-ignore` list (last file wins, same as
     /// `default-watches`) — global, not per-root.
     pub ignore: Vec<String>,
+    /// Merged `delete-convert-backup` (last file wins; default `false`).
+    pub delete_convert_backup: bool,
 }
 
 impl MergedConfig {
@@ -60,6 +62,7 @@ fn list_toml_files(dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
 fn load_roots_dir(dir: &Path) -> anyhow::Result<MergedConfig> {
     let mut default_watches: Vec<String> = Vec::new();
     let mut default_ignore: Vec<String> = Vec::new();
+    let mut delete_convert_backup = false;
     let mut roots: BTreeMap<String, config::RawRootEntry> = BTreeMap::new();
 
     for file in list_toml_files(dir)? {
@@ -70,6 +73,9 @@ fn load_roots_dir(dir: &Path) -> anyhow::Result<MergedConfig> {
         }
         if let Some(di) = parsed.default_ignore {
             default_ignore = di;
+        }
+        if let Some(delete) = parsed.delete_convert_backup {
+            delete_convert_backup = delete;
         }
         for (path, entry) in parsed.roots {
             let merged_entry = roots.entry(path).or_default();
@@ -94,6 +100,7 @@ fn load_roots_dir(dir: &Path) -> anyhow::Result<MergedConfig> {
     Ok(MergedConfig {
         roots: resolved,
         ignore: default_ignore,
+        delete_convert_backup,
     })
 }
 
@@ -295,6 +302,7 @@ mod tests {
                 },
             ],
             ignore: Vec::new(),
+            delete_convert_backup: false,
         };
         assert_eq!(
             config.all_watched_names(),

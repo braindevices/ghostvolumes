@@ -18,7 +18,7 @@ fn unique_tmp_path(dir: &Path, file_name: &str) -> PathBuf {
     dir.join(format!(".{file_name}.{pid}.{counter}.tmp"))
 }
 
-pub fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
+pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> anyhow::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent directory"))?;

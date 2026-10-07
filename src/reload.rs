@@ -39,7 +39,7 @@ fn reload_with_validator(
 ) -> anyhow::Result<()> {
     let _lock = lock_for_reload(cache_path)?;
 
-    let config = merge::load_all(config_dir)?;
+    let mut config = merge::load_all(config_dir)?;
 
     for root in &config.roots {
         let root_path = Path::new(&root.path);
@@ -59,8 +59,18 @@ fn reload_with_validator(
         }
     }
 
+    // The shim matches on kernel-resolved (physical) paths, so roots are
+    // compiled in that form too, e.g. `/home` -> `/var/home`.
+    for root in &mut config.roots {
+        if let Ok(real) = Path::new(&root.path).canonicalize() {
+            root.path = real.display().to_string();
+        }
+    }
     let text = cache::compile(&config);
     write_atomically(cache_path, &text)?;
+    if let Some(data_dir) = cache_path.parent() {
+        crate::projects::canonicalize_entries(&data_dir.join(filenames::PROJECT_ROOTS_FILE_NAME))?;
+    }
     Ok(())
 }
 
@@ -120,6 +130,72 @@ mod tests {
 
         let text = fs::read_to_string(&paths.cache_path).unwrap();
         assert_eq!(text, "/home/user1\tnode_modules\n");
+    }
+
+    #[test]
+    fn roots_and_project_roots_are_compiled_as_physical_paths() {
+        let paths = test_paths();
+        let real = paths
+            .config_dir
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join("real");
+        fs::create_dir_all(real.join("proj")).unwrap();
+        let link = real.parent().unwrap().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        fs::create_dir_all(paths.config_dir.join(filenames::ROOTS_D_DIR)).unwrap();
+        fs::write(
+            paths
+                .config_dir
+                .join(filenames::ROOTS_D_DIR)
+                .join(filenames::AUTO_ROOTS_FILE_NAME),
+            format!("[\"{}\"]", link.display()),
+        )
+        .unwrap();
+        fs::write(
+            paths
+                .config_dir
+                .join(filenames::ROOTS_D_DIR)
+                .join(filenames::DEFAULT_WATCHES_FILE_NAME),
+            r#"default-watches = ["node_modules"]"#,
+        )
+        .unwrap();
+        let list = paths
+            .cache_path
+            .parent()
+            .unwrap()
+            .join(filenames::PROJECT_ROOTS_FILE_NAME);
+        fs::create_dir_all(list.parent().unwrap()).unwrap();
+        let (via_link, real_proj) = (link.join("proj"), real.join("proj"));
+        fs::write(
+            &list,
+            format!("{}\n{}\n/gone\n", via_link.display(), real_proj.display()),
+        )
+        .unwrap();
+
+        reload_with_validator(&paths.config_dir, &paths.cache_path, |_| Ok(true)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&paths.cache_path).unwrap(),
+            format!("{}\tnode_modules\n", real.display())
+        );
+        assert_eq!(
+            fs::read_to_string(&list).unwrap(),
+            format!("{}\n/gone\n", real_proj.display()),
+            "canonicalized, deduplicated, missing entry kept"
+        );
+
+        // An entry that is itself a symlink is never widened to its target.
+        let self_link = real.join("proj-link");
+        std::os::unix::fs::symlink(real.parent().unwrap(), &self_link).unwrap();
+        fs::write(&list, format!("{}\n", self_link.display())).unwrap();
+        reload_with_validator(&paths.config_dir, &paths.cache_path, |_| Ok(true)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&list).unwrap(),
+            format!("{}\n", self_link.display())
+        );
     }
 
     #[test]

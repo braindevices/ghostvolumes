@@ -31,6 +31,8 @@ struct Mode {
     /// a freshly-answered "yes"). `false` means only ever record or
     /// toggle the decision — never touch the filesystem.
     convert: bool,
+    /// Delete the `copy_and_swap` backup instead of keeping it.
+    delete_backup: bool,
 }
 
 impl Mode {
@@ -39,12 +41,14 @@ impl Mode {
     const CONVERT: Mode = Mode {
         decide: true,
         convert: true,
+        delete_backup: false,
     };
     /// `decide`'s own behavior: ask about (or apply) a decision, but
     /// never touch the filesystem either way.
     const DECIDE: Mode = Mode {
         decide: true,
         convert: false,
+        delete_backup: false,
     };
 }
 
@@ -136,7 +140,24 @@ pub(crate) fn read_stdin_line() -> Option<String> {
 }
 
 fn read_decision_file(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    decision::read_regular_file(path)
+}
+
+/// A decision file's current text for rewriting/appending: empty if
+/// absent, an error (never a silent overwrite) if it's a symlink or
+/// otherwise not a plain regular file.
+fn existing_decision_text(file_path: &Path) -> anyhow::Result<String> {
+    use std::io::Read;
+    match decision::open_regular_file(file_path, false) {
+        Ok(file) => {
+            let mut text = String::new();
+            file.take(decision::MAX_DECISION_FILE_BYTES)
+                .read_to_string(&mut text)?;
+            Ok(text)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `true` iff `a` and `b` fall under the same configured `roots.d` volume
@@ -225,15 +246,12 @@ fn append_pending_marker(data_dir: &Path, boundary: &Path, candidate: &Path) -> 
     };
     let _lock = lock_decisions(data_dir, boundary)?;
     let file_path = boundary.join(filenames::DECISION_FILE_NAME);
-    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
+    let existing = existing_decision_text(&file_path)?;
     if !decision::needs_pending_marker(&existing, &pattern) {
         return Ok(());
     }
     std::fs::create_dir_all(boundary)?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)?;
+    let mut file = decision::open_regular_file(&file_path, true)?;
     file.write_all(format!("{}\n", decision::pending_marker_line(&pattern)).as_bytes())?;
     Ok(())
 }
@@ -255,7 +273,7 @@ fn record_decision(
     let _lock = lock_decisions(data_dir, boundary)?;
     std::fs::create_dir_all(boundary)?;
     let file_path = boundary.join(filenames::DECISION_FILE_NAME);
-    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
+    let existing = existing_decision_text(&file_path)?;
     let decision_line = format!("{prefix} {decision_pattern}");
     let updated = decision::toggle_or_replace_pending(&existing, anchored_pattern, &decision_line);
     crate::atomic_write::write_atomically(&file_path, &updated)
@@ -274,8 +292,13 @@ fn ask_and_maybe_convert(
     mode: Mode,
     read_line: &mut impl FnMut() -> Option<String>,
 ) -> anyhow::Result<()> {
-    let anchored = decision::anchored_pattern(boundary, candidate)
-        .unwrap_or_else(|| candidate.display().to_string());
+    let Some(anchored) = decision::anchored_pattern(boundary, candidate) else {
+        println!(
+            "skip: {} (name can't be recorded in a decision file)",
+            candidate.display()
+        );
+        return Ok(());
+    };
     if !is_tty {
         // Always printed: the one signal a human has that a decision is
         // waiting to be made.
@@ -301,7 +324,9 @@ fn ask_and_maybe_convert(
         }
     };
     if mode.convert {
-        materialize(candidate, boundary, data_dir)?;
+        // Fail before converting, not after, if the `+` can't be recorded.
+        existing_decision_text(&boundary.join(filenames::DECISION_FILE_NAME))?;
+        materialize(candidate, boundary, data_dir, mode.delete_backup)?;
     }
     record_decision(data_dir, boundary, &anchored, &pattern, "+")
 }
@@ -335,7 +360,37 @@ fn create_empty(target: &Path) -> anyhow::Result<()> {
 /// Creates a subvolume at a temp sibling path, `cp -a --reflink=always`s
 /// the existing plain directory's contents in, then atomically swaps it
 /// into place and removes the old directory.
-fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
+/// Markers of `copy_and_swap`'s own sibling dirs — never candidates.
+const CONVERT_TMP_SUFFIX: &str = ".ghostvolumes-convert-tmp";
+const CONVERT_OLD_MARKER: &str = ".ghostvolumes-convert-old";
+
+fn copy_and_swap(path: &Path, delete_backup: bool) -> anyhow::Result<()> {
+    copy_and_swap_with(path, delete_backup, std::ffi::OsStr::new("cp"))
+}
+
+/// A fresh `.<name>.ghostvolumes-convert-old.<unix-secs>[-n]` next to
+/// `path`: unique, so a kept backup never blocks a later convert.
+fn unique_backup_dir(parent: &Path, name: &str) -> PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let base = format!(".{name}{CONVERT_OLD_MARKER}.{secs}");
+    let mut dir = parent.join(&base);
+    let mut n = 1;
+    while dir.symlink_metadata().is_ok() {
+        dir = parent.join(format!("{base}-{n}"));
+        n += 1;
+    }
+    dir
+}
+
+/// `copy_and_swap` with the copy program injectable (tests pass `false`
+/// to exercise the failed-copy cleanup).
+fn copy_and_swap_with(
+    path: &Path,
+    delete_backup: bool,
+    cp: &std::ffi::OsStr,
+) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
@@ -345,25 +400,27 @@ fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
         .to_string_lossy()
         .into_owned();
 
-    let tmp_name = format!(".{name}.ghostvolumes-convert-tmp");
+    let tmp_name = format!(".{name}{CONVERT_TMP_SUFFIX}");
     let tmp_path = parent.join(&tmp_name);
-    if tmp_path.exists() {
+    if tmp_path.symlink_metadata().is_ok() {
         anyhow::bail!(
-            "temp path {} already exists; a previous convert may have failed partway — \
+            "{} already exists; a previous convert may have failed partway — \
              remove it manually and retry",
             tmp_path.display()
         );
     }
     btrfs::create_subvolume(parent, &tmp_name)?;
     println!("create: {} (temporary subvolume)", tmp_path.display());
-    let status = Command::new("cp")
+    let status = Command::new(cp)
         .arg("-a")
         .arg("--reflink=always")
         .arg("--")
-        .arg(format!("{}/.", path.display()))
+        .arg(path.join("."))
         .arg(&tmp_path)
         .status()?;
     if !status.success() {
+        // Best effort: a leftover temp subvolume would block the next run.
+        let _ = std::fs::remove_dir_all(&tmp_path);
         anyhow::bail!(
             "cp -a --reflink=always into {} failed: {status}",
             tmp_path.display()
@@ -375,21 +432,60 @@ fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
         tmp_path.display()
     );
 
-    // Atomic swap: move the old plain dir out of the way, move the new
-    // subvolume into place, then clean up the old dir. `path` is never
-    // missing or half-written in between the two renames.
-    let backup_name = format!(".{name}.ghostvolumes-convert-old");
-    let backup_path = parent.join(&backup_name);
-    std::fs::rename(path, &backup_path)?;
+    // Swap: move the old plain dir into its backup wrapper, then the new
+    // subvolume into place — rolled back if the second rename fails, so
+    // `path` is never left missing.
+    let backup_dir = unique_backup_dir(parent, &name);
+    std::fs::create_dir(&backup_dir)?;
+    let backup_path = backup_dir.join(&name);
+    if let Err(e) = std::fs::rename(path, &backup_path) {
+        let _ = std::fs::remove_dir(&backup_dir);
+        return Err(e.into());
+    }
     println!("rename: {} -> {}", path.display(), backup_path.display());
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        if let Err(rollback) = std::fs::rename(&backup_path, path) {
+            anyhow::bail!(
+                "rename {} -> {} failed ({e}), and so did restoring the original ({rollback}): \
+                 the original data is at {}, the copy at {}",
+                tmp_path.display(),
+                path.display(),
+                backup_path.display(),
+                tmp_path.display()
+            );
+        }
+        let _ = std::fs::remove_dir(&backup_dir);
+        // Rolled back: a leftover temp subvolume would block the next run.
+        let _ = std::fs::remove_dir_all(&tmp_path);
+        return Err(e.into());
+    }
     println!(
         "rename: {} -> {} (subvolume now in place)",
         tmp_path.display(),
         path.display()
     );
-    std::fs::remove_dir_all(&backup_path)?;
-    println!("remove: {} (old backup)", backup_path.display());
+    // Kept by default: anything written into `path` after `cp` passed it
+    // only exists in the backup (the per-boundary lock doesn't stop
+    // ordinary writes). Reflinked, so it costs nothing until it diverges.
+    // Its own `.gitignore` keeps it out of `git add -A`; one inside the
+    // old tree (`<name>/.gitignore`) is never touched.
+    if !delete_backup {
+        let _ = std::fs::write(backup_dir.join(".gitignore"), "*\n");
+        println!(
+            "backup kept: {} (remove once nothing was writing into {} during the copy: \
+             rm -rf {}; all of them: rm -rf {}/.{name}{CONVERT_OLD_MARKER}.*)",
+            backup_path.display(),
+            path.display(),
+            backup_dir.display(),
+            parent.display()
+        );
+    } else if let Err(e) = std::fs::remove_dir_all(&backup_dir) {
+        // The conversion itself succeeded; don't fail it (and skip
+        // recording its `+`) over cleanup.
+        eprintln!("warning: could not remove {}: {e}", backup_dir.display());
+    } else {
+        println!("remove: {} (old backup)", backup_dir.display());
+    }
 
     Ok(())
 }
@@ -399,19 +495,58 @@ fn copy_and_swap(path: &Path) -> anyhow::Result<()> {
 /// own (non-blocking) lock on the same boundary. Blocking is fine here
 /// since `convert` is a human-run command. Held only around this
 /// operation, not the "remember this?" prompt before it.
-fn materialize(target: &Path, boundary: &Path, data_dir: &Path) -> anyhow::Result<()> {
+fn materialize(
+    target: &Path,
+    boundary: &Path,
+    data_dir: &Path,
+    delete_backup: bool,
+) -> anyhow::Result<()> {
+    check_contained(target, boundary)?;
     let lock_path = crate::lock::boundary_lock_path(&data_dir.join(filenames::LOCKS_DIR), boundary);
     let lock_file = crate::lock::open_lock_file(&lock_path)?;
     lock_file.lock()?;
     if target.exists() {
-        copy_and_swap(target)
+        copy_and_swap(target, delete_backup)
     } else {
         create_empty(target)
     }
 }
 
+/// A decision file (possibly from a cloned repo) must never steer
+/// `materialize` outside its project: `target` has to be strictly under
+/// `boundary` by plain names, every existing component in between a
+/// real directory (not a symlink, which could point anywhere), and
+/// `target` itself a real directory if it exists. Missing components
+/// are fine — `create_empty` creates them.
+fn check_contained(target: &Path, boundary: &Path) -> anyhow::Result<()> {
+    use std::path::Component;
+    let refuse = |why: &str| anyhow::anyhow!("refusing {}: {why}", target.display());
+    let rel = target
+        .strip_prefix(boundary)
+        .map_err(|_| refuse("outside the project"))?;
+    if rel.as_os_str().is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(refuse("not strictly inside the project"));
+    }
+    let mut path = boundary.to_path_buf();
+    for component in rel.components() {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(refuse(&format!(
+                    "{} is not a plain directory",
+                    path.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 fn read_ignore_file(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    decision::read_regular_file(path)
 }
 
 /// Should `candidate` be skipped entirely by the walk, never even
@@ -453,8 +588,8 @@ fn is_ignored(
 /// can't discover on its own (doesn't exist yet, or isn't a watched
 /// name). Shared by `convert` and `decide`.
 fn decision_file_anchored_candidates(boundary: &Path) -> Vec<PathBuf> {
-    let text =
-        std::fs::read_to_string(boundary.join(filenames::DECISION_FILE_NAME)).unwrap_or_default();
+    let text = decision::read_regular_file(&boundary.join(filenames::DECISION_FILE_NAME))
+        .unwrap_or_default();
     decision::parse_anchored_exact_patterns(&text)
         .into_iter()
         .map(|pattern| boundary.join(pattern.trim_start_matches('/')))
@@ -516,7 +651,10 @@ fn find_nested_candidates_inner(
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let path = entry.path();
-        if is_ignored(rows, boundary, global_ignore, &path) {
+        if is_ignored(rows, boundary, global_ignore, &path)
+            || name_str.ends_with(CONVERT_TMP_SUFFIX)
+            || name_str.contains(CONVERT_OLD_MARKER)
+        {
             continue;
         }
         // An existing subvolume is a candidate regardless of whether its
@@ -611,8 +749,13 @@ fn resolve_candidate(
             );
             return Ok(());
         }
-        let anchored = decision::anchored_pattern(boundary, candidate)
-            .unwrap_or_else(|| candidate.display().to_string());
+        let Some(anchored) = decision::anchored_pattern(boundary, candidate) else {
+            println!(
+                "skip: {} (name can't be recorded in a decision file)",
+                candidate.display()
+            );
+            return Ok(());
+        };
         if !is_tty {
             println!(
                 "skip: {} (already a subvolume, undecided — run with a TTY to decide, or edit the decision file by hand)",
@@ -658,7 +801,7 @@ fn resolve_candidate(
                 report_would_materialize(candidate);
                 return Ok(());
             }
-            materialize(candidate, boundary, data_dir)
+            materialize(candidate, boundary, data_dir, mode.delete_backup)
         }
         Some(false) => {
             if !is_explicit {
@@ -928,6 +1071,7 @@ pub fn convert(
     project_roots_path: &Path,
     data_dir: &Path,
     dry_run: bool,
+    delete_backup: bool,
 ) -> anyhow::Result<()> {
     let mut read_line = read_stdin_line;
     convert_with_io(
@@ -939,6 +1083,7 @@ pub fn convert(
         project_roots_path,
         data_dir,
         dry_run,
+        delete_backup,
         std::io::stdin().is_terminal(),
         &mut read_line,
     )
@@ -954,6 +1099,7 @@ fn convert_with_io(
     project_roots_path: &Path,
     data_dir: &Path,
     dry_run: bool,
+    delete_backup: bool,
     is_tty: bool,
     read_line: &mut impl FnMut() -> Option<String>,
 ) -> anyhow::Result<()> {
@@ -963,7 +1109,12 @@ fn convert_with_io(
     let rows = cache::parse(&std::fs::read_to_string(cache_path).unwrap_or_default());
     let mut project_roots =
         project_roots::parse(&std::fs::read_to_string(project_roots_path).unwrap_or_default());
-    let global_ignore = merge::load_all(config_dir)?.ignore;
+    let config = merge::load_all(config_dir)?;
+    let global_ignore = config.ignore;
+    let mode = Mode {
+        delete_backup: delete_backup || config.delete_convert_backup,
+        ..Mode::CONVERT
+    };
 
     ensure_project_registered(
         path,
@@ -998,14 +1149,7 @@ fn convert_with_io(
 
     for candidate in &candidates {
         resolve_candidate(
-            candidate,
-            &boundary,
-            create,
-            data_dir,
-            is_tty,
-            dry_run,
-            Mode::CONVERT,
-            read_line,
+            candidate, &boundary, create, data_dir, is_tty, dry_run, mode, read_line,
         )?;
     }
     Ok(())
@@ -1095,6 +1239,12 @@ fn decide_with_io(
         });
     }
 
+    if let Some(bad) = add.iter().chain(deny).find(|p| !decision::valid_pattern(p)) {
+        anyhow::bail!(
+            "invalid pattern {bad:?}: `.`/`..` components and control characters aren't allowed"
+        );
+    }
+
     // 1. Hand-authored patterns, verbatim, first.
     for pattern in add {
         record_decision(data_dir, &boundary, pattern, pattern, "+")?;
@@ -1168,6 +1318,7 @@ mod tests {
             project_roots_path,
             data_dir,
             dry_run,
+            false,
             false,
             &mut no_stdin,
         )
@@ -1689,6 +1840,7 @@ mod tests {
             &roots_path(&cache_dir),
             cache_dir.path(),
             false,
+            false,
             true,
             &mut move || answers.next(),
         )
@@ -1769,22 +1921,17 @@ mod tests {
     }
 
     #[test]
-    fn no_leftover_backup_or_tmp_directories_after_success() {
+    fn leftover_convert_tmp_and_backup_dirs_are_never_candidates() {
         let scratch = btrfs_scratch_dir();
-        let target = scratch.path().join("target");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("f"), b"x").unwrap();
+        btrfs::create_subvolume(scratch.path(), ".build.ghostvolumes-convert-tmp").unwrap();
+        std::fs::create_dir(scratch.path().join(".target.ghostvolumes-convert-old")).unwrap();
         let cache_dir = empty_cache();
         register_project(&cache_dir, scratch.path());
-        std::fs::write(
-            scratch.path().join(filenames::DECISION_FILE_NAME),
-            "+ target\n",
-        )
-        .unwrap();
+        write_cache_rows(&cache_path(&cache_dir), &[(scratch.path(), "target")]);
 
         convert(
             scratch.path(),
-            std::slice::from_ref(&target),
+            &[],
             None,
             &config_path(&cache_dir),
             &cache_path(&cache_dir),
@@ -1794,13 +1941,133 @@ mod tests {
         )
         .unwrap();
 
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn only_a_leftover_tmp_blocks_copy_and_swap_and_a_failed_copy_cleans_up() {
+        let scratch = btrfs_scratch_dir();
+        let target = scratch.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("f"), "x").unwrap();
+        let tmp = scratch.path().join(".target.ghostvolumes-convert-tmp");
+
+        // A failed copy leaves no temp subvolume and the original intact.
+        assert!(copy_and_swap_with(&target, true, std::ffi::OsStr::new("false")).is_err());
+        assert!(!tmp.exists());
+        assert!(!btrfs::is_subvolume(&target).unwrap());
+        assert_eq!(std::fs::read_to_string(target.join("f")).unwrap(), "x");
+
+        // A leftover temp dir blocks before anything changes...
+        std::fs::create_dir(&tmp).unwrap();
+        let err = copy_and_swap(&target, true).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(!btrfs::is_subvolume(&target).unwrap());
+        std::fs::remove_dir(&tmp).unwrap();
+
+        // ...but kept backups from earlier converts never do.
+        std::fs::create_dir(scratch.path().join(".target.ghostvolumes-convert-old.1")).unwrap();
+        copy_and_swap(&target, false).unwrap();
         assert!(btrfs::is_subvolume(&target).unwrap());
-        let entries: Vec<_> = std::fs::read_dir(scratch.path())
+        let backups = std::fs::read_dir(scratch.path())
             .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .filter(|name| name.to_string_lossy() != filenames::DECISION_FILE_NAME)
-            .collect();
-        assert_eq!(entries, vec![std::ffi::OsString::from("target")]);
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy()
+                    .starts_with(".target.ghostvolumes-convert-old.")
+            })
+            .count();
+        assert_eq!(backups, 2, "the earlier backup plus this run's");
+    }
+
+    #[test]
+    fn the_backup_is_kept_by_default_and_deleted_when_configured() {
+        for delete in [false, true] {
+            let scratch = btrfs_scratch_dir();
+            let target = scratch.path().join("target");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("f"), b"x").unwrap();
+            std::fs::write(target.join(".gitignore"), "own\n").unwrap();
+            let cache_dir = empty_cache();
+            register_project(&cache_dir, scratch.path());
+            std::fs::write(
+                scratch.path().join(filenames::DECISION_FILE_NAME),
+                "+ target\n",
+            )
+            .unwrap();
+            let roots_d = config_path(&cache_dir).join(filenames::ROOTS_D_DIR);
+            std::fs::create_dir_all(&roots_d).unwrap();
+            std::fs::write(
+                roots_d.join("10-local.toml"),
+                format!("delete-convert-backup = {delete}\n"),
+            )
+            .unwrap();
+
+            convert(
+                scratch.path(),
+                std::slice::from_ref(&target),
+                None,
+                &config_path(&cache_dir),
+                &cache_path(&cache_dir),
+                &roots_path(&cache_dir),
+                cache_dir.path(),
+                false,
+            )
+            .unwrap();
+
+            assert!(btrfs::is_subvolume(&target).unwrap());
+            assert_eq!(std::fs::read(target.join("f")).unwrap(), b"x");
+            let backups: Vec<PathBuf> = std::fs::read_dir(scratch.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(".ghostvolumes-convert-old.")
+                })
+                .collect();
+            if delete {
+                assert!(backups.is_empty(), "{backups:?}");
+            } else {
+                assert_eq!(backups.len(), 1, "{backups:?}");
+                let backup = &backups[0];
+                assert_eq!(std::fs::read(backup.join("target/f")).unwrap(), b"x");
+                assert_eq!(
+                    std::fs::read_to_string(backup.join(".gitignore")).unwrap(),
+                    "*\n"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(backup.join("target/.gitignore")).unwrap(),
+                    "own\n",
+                    "the old tree's own .gitignore is never overwritten"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn git_never_sees_a_kept_backup() {
+        let git =
+            |dir: &Path, args: &[&str]| Command::new("git").args(args).current_dir(dir).output();
+        let scratch = btrfs_scratch_dir();
+        if git(scratch.path(), &["init", "-q"]).is_err() {
+            return; // no git installed
+        }
+        let target = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("i.js"), "x").unwrap();
+        std::fs::write(scratch.path().join(".gitignore"), "node_modules/\n").unwrap();
+
+        copy_and_swap(&target, false).unwrap();
+
+        let out = git(
+            scratch.path(),
+            &["status", "--porcelain", "--untracked-files=all"],
+        )
+        .unwrap();
+        let status = String::from_utf8_lossy(&out.stdout);
+        assert!(!status.contains("convert-old"), "{status}");
     }
 
     #[test]
@@ -2056,6 +2323,7 @@ mod tests {
             &roots_path(&cache_dir),
             cache_dir.path(),
             false,
+            false,
             true,
             &mut move || answers.next(),
         )
@@ -2084,6 +2352,7 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
+            false,
             false,
             true,
             &mut move || answers.next(),
@@ -2114,6 +2383,7 @@ mod tests {
             &roots_path(&cache_dir),
             cache_dir.path(),
             true,
+            false,
             true,
             &mut || panic!("dry run must never prompt"),
         )
@@ -2142,6 +2412,7 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
+            false,
             false,
             true,
             &mut move || answers.next(),
@@ -2200,6 +2471,7 @@ mod tests {
             Mode {
                 decide: false,
                 convert: true,
+                delete_backup: false,
             },
             &mut || panic!("decide disabled - must never ask"),
         )
@@ -2295,6 +2567,66 @@ mod tests {
         assert_eq!(new_ino, 256);
     }
 
+    /// Runs a non-TTY `convert` of `project` (registered) with
+    /// `decisions` as its decision file and `create` as `--create`.
+    fn convert_project(project: &Path, decisions: &str, create: &[PathBuf]) -> anyhow::Result<()> {
+        std::fs::write(project.join(filenames::DECISION_FILE_NAME), decisions).unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, project);
+        convert(
+            project,
+            create,
+            None,
+            &config_path(&cache_dir),
+            &cache_path(&cache_dir),
+            &roots_path(&cache_dir),
+            cache_dir.path(),
+            false,
+        )
+    }
+
+    #[test]
+    fn decision_patterns_never_convert_anything_outside_the_project() {
+        let scratch = btrfs_scratch_dir();
+        let project = scratch.path().join("proj");
+        let outside = scratch.path().join("outside");
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::fs::write(outside.join("sub/keep"), "data").unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("link")).unwrap();
+        std::fs::write(project.join("afile"), "x").unwrap();
+
+        // `..` patterns are dropped by the parser: not even a candidate.
+        convert_project(&project, "+ /../outside\n+ /../outside/sub\n", &[]).unwrap();
+        // A symlinked component or a non-directory is refused outright.
+        assert!(convert_project(&project, "+ /link/sub\n", &[]).is_err());
+        assert!(convert_project(&project, "+ /afile\n", &[]).is_err());
+        let via_link = project.join("link/new");
+        assert!(convert_project(&project, "+ /link/new\n", &[via_link]).is_err());
+
+        assert!(!btrfs::is_subvolume(&outside).unwrap());
+        assert!(!btrfs::is_subvolume(&outside.join("sub")).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sub/keep")).unwrap(),
+            "data"
+        );
+        assert!(!outside.join("new").exists());
+        assert_eq!(std::fs::read_to_string(project.join("afile")).unwrap(), "x");
+    }
+
+    #[test]
+    fn check_contained_accepts_only_plain_paths_strictly_inside() {
+        let scratch = btrfs_scratch_dir();
+        let p = scratch.path();
+        std::fs::create_dir_all(p.join("a/b")).unwrap();
+        assert!(check_contained(&p.join("a/b"), p).is_ok());
+        assert!(check_contained(&p.join("a/missing/deeper"), p).is_ok());
+        assert!(check_contained(p, p).is_err());
+        assert!(check_contained(&p.join("../x"), p).is_err());
+        assert!(check_contained(&p.join("a/../a/b"), p).is_err());
+        assert!(check_contained(Path::new("/elsewhere/x"), p).is_err());
+    }
+
     #[test]
     fn a_plus_decision_converts_directly_without_asking() {
         let scratch = btrfs_scratch_dir();
@@ -2349,6 +2681,7 @@ mod tests {
             &roots_path(&cache_dir),
             cache_dir.path(),
             false,
+            false,
             true,
             &mut move || answers.next(),
         )
@@ -2361,6 +2694,51 @@ mod tests {
             // unlike "a" ("all matches") which would record a bare
             // "node_modules" pattern instead - see anchored_pattern.
             "+ /node_modules\n"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_decision_file_is_never_read_through_or_written_through() {
+        let scratch = btrfs_scratch_dir();
+        let outside = btrfs_scratch_dir();
+        let secret = outside.path().join("id_ed25519");
+        std::fs::write(&secret, "SECRET\n").unwrap();
+        let decision_file = scratch.path().join(filenames::DECISION_FILE_NAME);
+        std::os::unix::fs::symlink(&secret, &decision_file).unwrap();
+        let target = scratch.path().join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+
+        for (is_tty, answer) in [(false, None), (true, Some("y".to_string()))] {
+            let mut answers = answer.into_iter();
+            let err = convert_with_io(
+                scratch.path(),
+                std::slice::from_ref(&target),
+                None,
+                &config_path(&cache_dir),
+                &cache_path(&cache_dir),
+                &roots_path(&cache_dir),
+                cache_dir.path(),
+                false,
+                false,
+                is_tty,
+                &mut move || answers.next(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("not a regular file"), "{err}");
+        }
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "SECRET\n");
+        assert!(
+            !btrfs::is_subvolume(&target).unwrap(),
+            "refused before converting"
+        );
+        assert!(
+            decision_file
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 
@@ -2384,6 +2762,7 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
+            false,
             false,
             true,
             &mut move || answers.next(),
@@ -2483,6 +2862,7 @@ mod tests {
             &roots_path(&cache_dir),
             cache_dir.path(),
             false,
+            false,
             true,
             &mut move || answers.next(),
         )
@@ -2517,6 +2897,7 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
+            false,
             false,
             true,
             &mut move || answers.next(),
@@ -2554,6 +2935,7 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
+            false,
             false,
             true,
             &mut move || answers.next(),
@@ -2801,8 +3183,9 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
-            true, // dry_run
-            true, // is_tty - would ask if this weren't a dry run
+            true,
+            false, // dry_run
+            true,  // is_tty - would ask if this weren't a dry run
             &mut || panic!("dry run must never prompt"),
         )
         .unwrap();
@@ -2884,8 +3267,9 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
-            true, // dry_run
-            true, // is_tty - would ask if this weren't a dry run
+            true,
+            false, // dry_run
+            true,  // is_tty - would ask if this weren't a dry run
             &mut || panic!("dry run must never prompt, even to register the project"),
         )
         .unwrap();
@@ -2917,8 +3301,9 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
-            true, // dry_run
-            true, // is_tty - would ask to override if this weren't a dry run
+            true,
+            false, // dry_run
+            true,  // is_tty - would ask to override if this weren't a dry run
             &mut || panic!("dry run must never prompt, even to confirm an override"),
         )
         .unwrap();
@@ -3007,6 +3392,7 @@ mod tests {
             &cache_path(&cache_dir),
             &roots_path(&cache_dir),
             cache_dir.path(),
+            false,
             false,
             true,
             &mut move || answers.next(),
@@ -3400,6 +3786,31 @@ mod tests {
     }
 
     #[test]
+    fn decide_rejects_dot_dot_and_control_char_patterns_without_writing() {
+        let scratch = btrfs_scratch_dir();
+        let cache_dir = empty_cache();
+        register_project(&cache_dir, scratch.path());
+        for (add, deny) in [
+            (vec!["/../x".to_string()], vec![]),
+            (vec![], vec!["a\nb".to_string()]),
+        ] {
+            let err = decide(
+                scratch.path(),
+                &add,
+                &deny,
+                None,
+                &config_path(&cache_dir),
+                &cache_path(&cache_dir),
+                &roots_path(&cache_dir),
+                cache_dir.path(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("invalid pattern"), "{err}");
+        }
+        assert!(!scratch.path().join(filenames::DECISION_FILE_NAME).exists());
+    }
+
+    #[test]
     fn decide_walk_finding_an_existing_plus_decision_is_a_no_op_not_a_materialize() {
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
@@ -3515,7 +3926,7 @@ mod tests {
         let boundary_thread = boundary.clone();
         let data_dir = cache_dir.path().to_path_buf();
         let handle = std::thread::spawn(move || {
-            materialize(&target_thread, &boundary_thread, &data_dir).unwrap();
+            materialize(&target_thread, &boundary_thread, &data_dir, false).unwrap();
         });
 
         std::thread::sleep(std::time::Duration::from_millis(100));

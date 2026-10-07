@@ -36,7 +36,9 @@ default-ignore = [
 
 pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
-    std::fs::write(data_dir.join(filenames::SHIM_FILE_NAME), PRELOAD_SO)?;
+    // Rename, never truncate in place: every preloaded process has the
+    // old file mmapped, and rewriting its pages under it means SIGBUS.
+    crate::atomic_write::write_atomically(&data_dir.join(filenames::SHIM_FILE_NAME), PRELOAD_SO)?;
 
     std::fs::create_dir_all(config_dir.join(filenames::ROOTS_D_DIR))?;
     let defaults_path = config_dir
@@ -46,7 +48,46 @@ pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
         std::fs::write(&defaults_path, DEFAULTS_TOML)?;
     }
 
+    // An upgrade: recompile `compiled.tsv`/`project-roots.list` in the
+    // form this version's shim expects (e.g. physical paths), so `init`
+    // alone completes it. Never fails `init` — the shim is installed.
+    let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
+    if cache_path.exists()
+        && let Err(e) = crate::reload::reload(config_dir, &cache_path)
+    {
+        eprintln!(
+            "warning: shim installed, but `reload` failed ({e}) - fix it and re-run `ghostvolumes reload`"
+        );
+    }
+
     Ok(())
+}
+
+/// `false` if the installed shim isn't this binary's embedded one —
+/// missing, or left over from before a `cargo install` upgrade (only
+/// `init` copies it to disk), so it may disagree with this CLI's file
+/// formats and lock paths.
+pub fn shim_is_current(data_dir: &Path) -> bool {
+    let path = data_dir.join(filenames::SHIM_FILE_NAME);
+    std::fs::metadata(&path).is_ok_and(|m| m.len() == PRELOAD_SO.len() as u64)
+        && std::fs::read(&path).is_ok_and(|bytes| bytes == PRELOAD_SO)
+}
+
+/// The shim passes every call through unless the data dir belongs to the
+/// process's euid (see `data_dir_owned_by_euid` in `shim/preload.rs`).
+pub fn data_dir_owned_by_euid(data_dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(data_dir).is_ok_and(|m| m.uid() == unsafe { libc::geteuid() })
+}
+
+/// One stderr line when `shim_is_current` is false; stdout stays clean
+/// for `shell-init`'s `eval`.
+pub fn warn_if_shim_stale(data_dir: &Path) {
+    if !shim_is_current(data_dir) {
+        eprintln!(
+            "warning: the installed shim is missing or out of date - run `ghostvolumes init`"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +131,71 @@ mod tests {
         let written = std::fs::read(dirs.data_dir.join(filenames::SHIM_FILE_NAME)).unwrap();
         assert_eq!(written, PRELOAD_SO);
         assert!(!written.is_empty());
+    }
+
+    #[test]
+    fn rerunning_replaces_the_shim_by_rename_not_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let dirs = test_dirs();
+        let so = dirs.data_dir.join(filenames::SHIM_FILE_NAME);
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        // Holding the old inode open stands in for a process that has it
+        // mmapped: an in-place rewrite would change what it sees.
+        let old = std::fs::File::open(&so).unwrap();
+        let old_ino = old.metadata().unwrap().ino();
+
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+
+        assert_ne!(std::fs::metadata(&so).unwrap().ino(), old_ino);
+        assert_eq!(std::fs::read(&so).unwrap(), PRELOAD_SO);
+        assert_eq!(old.metadata().unwrap().len(), PRELOAD_SO.len() as u64);
+    }
+
+    #[test]
+    fn shim_is_current_tracks_the_installed_bytes() {
+        let dirs = test_dirs();
+        assert!(!shim_is_current(&dirs.data_dir), "missing");
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        assert!(shim_is_current(&dirs.data_dir));
+        let so = dirs.data_dir.join(filenames::SHIM_FILE_NAME);
+        let mut stale = PRELOAD_SO.to_vec();
+        stale[0] ^= 1;
+        std::fs::write(&so, stale).unwrap();
+        assert!(
+            !shim_is_current(&dirs.data_dir),
+            "same size, different bytes"
+        );
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        assert!(shim_is_current(&dirs.data_dir));
+    }
+
+    #[test]
+    fn rerunning_init_reloads_an_existing_cache_and_tolerates_failure() {
+        let dirs = test_dirs();
+        let scratch = crate::test_support::btrfs_scratch_dir();
+        let real = scratch.path().canonicalize().unwrap().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = real.with_file_name("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        std::fs::write(
+            dirs.config_dir
+                .join(filenames::ROOTS_D_DIR)
+                .join(filenames::AUTO_ROOTS_FILE_NAME),
+            format!("[\"{}\"]", link.display()),
+        )
+        .unwrap();
+        let cache = dirs.data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
+        std::fs::write(&cache, format!("{}\tnode_modules\n", link.display())).unwrap();
+
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        let text = std::fs::read_to_string(&cache).unwrap();
+        assert!(text.starts_with(&format!("{}\t", real.display())), "{text}");
+
+        // A root that's gone makes `reload` fail; `init` still succeeds.
+        std::fs::remove_file(&link).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        assert!(shim_is_current(&dirs.data_dir));
     }
 
     #[test]

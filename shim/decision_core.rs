@@ -20,25 +20,25 @@ struct DecisionLine {
 
 /// Parses one decision file's raw text into its meaningful lines, in
 /// file order (so callers can apply "last matching line wins"). Ignores
-/// blank lines, `#` comments, and anything not exactly `+`/`-`-prefixed
-/// — `?` pending-marker lines fall into that catch-all too.
+/// blank lines, `#` comments, invalid patterns (see `valid_pattern`),
+/// and anything not exactly `+`/`-`-prefixed — `?` pending-marker lines
+/// fall into that catch-all too. Never panics on arbitrary text (a BOM
+/// or non-ASCII first char used to, aborting the shim's host process).
 fn parse_lines(text: &str) -> alloc_free_vec::Vec<DecisionLine> {
     let mut lines = alloc_free_vec::Vec::new();
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let (marker, rest) = trimmed.split_at(1);
-        let pattern = rest.trim_start();
-        if pattern.is_empty() {
-            continue;
-        }
-        let convert = match marker {
-            "+" => true,
-            "-" => false,
-            _ => continue, // malformed line - ignore, don't error
+        let trimmed = line.trim().trim_start_matches('\u{feff}').trim_start();
+        let (convert, rest) = if let Some(rest) = trimmed.strip_prefix('+') {
+            (true, rest)
+        } else if let Some(rest) = trimmed.strip_prefix('-') {
+            (false, rest)
+        } else {
+            continue; // blank, comment, `?` marker, or malformed - ignore
         };
+        let pattern = rest.trim_start();
+        if pattern.is_empty() || !valid_pattern(pattern) {
+            continue;
+        }
         lines.push(DecisionLine {
             convert,
             pattern: pattern.to_string(),
@@ -47,10 +47,100 @@ fn parse_lines(text: &str) -> alloc_free_vec::Vec<DecisionLine> {
     lines
 }
 
+/// A pattern names a location under its decision file's directory, so
+/// `.`/`..` components (which could point anywhere, e.g. `+ /../x`) and
+/// control characters (newline injection into a decision file) are
+/// never valid.
+pub fn valid_pattern(pattern: &str) -> bool {
+    !pattern.chars().any(char::is_control)
+        && pattern.split('/').all(|c| c != "." && c != "..")
+}
+
+/// Can this path be written into our one-entry-per-line files (decision
+/// files, `compiled.tsv`, `project-roots.list`) and read back unchanged
+/// with the same meaning? Every component must be non-empty (a leading
+/// `/` aside), free of control characters (a newline or tab would split
+/// the line or the row), free of leading/trailing whitespace (the
+/// readers trim), and not `.`, `..` or `**` (which mean something else).
+/// Names that fail are skipped with a warning, never escaped: no sensible
+/// project names a volatile directory like that.
+pub fn representable_path(path: &str) -> bool {
+    match path.strip_prefix('/') {
+        Some("") => true, // `/` itself
+        Some(rest) => rest.split('/').all(representable_component),
+        None => path.split('/').all(representable_component),
+    }
+}
+
+fn representable_component(c: &str) -> bool {
+    !c.is_empty()
+        && c.trim() == c
+        && !c.chars().any(char::is_control)
+        && !matches!(c, "." | ".." | "**")
+}
+
 // `alloc_free_vec` is just `std::vec`, named so the doc comment above
 // reads naturally - no actual no-alloc constraint here.
 mod alloc_free_vec {
     pub use std::vec::Vec;
+}
+
+/// Decision/ignore files can come from a cloned repo, so they're never
+/// read past this size (a symlink to `/dev/zero` is refused anyway).
+pub const MAX_DECISION_FILE_BYTES: u64 = 1 << 20;
+
+/// Opens a decision/ignore file only if it is a regular file — never
+/// through a symlink (a committed `.ghostvolumes-decisions ->
+/// ~/.bashrc` would get our appends), FIFO or device — at most
+/// `MAX_DECISION_FILE_BYTES`. The `lstat` result is re-checked on the
+/// opened fd (same dev/ino), so a swap in between is caught; a missing
+/// file is created with `O_EXCL`, which never follows a symlink.
+pub fn open_regular_file(
+    path: &std::path::Path,
+    append: bool,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    let refuse = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("refusing {}: not a regular file", path.display()),
+        )
+    };
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if append && e.kind() == std::io::ErrorKind::NotFound => {
+            return std::fs::OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .open(path);
+        }
+        Err(e) => return Err(e),
+    };
+    if !before.file_type().is_file() || before.len() > MAX_DECISION_FILE_BYTES {
+        return Err(refuse());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(!append)
+        .append(append)
+        .open(path)?;
+    let after = file.metadata()?;
+    if after.dev() != before.dev() || after.ino() != before.ino() {
+        return Err(refuse());
+    }
+    Ok(file)
+}
+
+/// `open_regular_file`'s text, or `None` if it's absent, unsafe or
+/// not UTF-8.
+pub fn read_regular_file(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    open_regular_file(path, false)
+        .ok()?
+        .take(MAX_DECISION_FILE_BYTES)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
 }
 
 /// Splits `pattern` (leading `/` already stripped) into path components
@@ -201,10 +291,12 @@ pub fn resolve(
 
 /// The anchored pattern text for `candidate`, relative to `boundary`,
 /// e.g. `/packages/foo/node_modules`. `None` if `candidate` isn't under
-/// `boundary` — shouldn't happen, but degrades safely rather than panicking.
+/// `boundary`, or the result wouldn't be a `valid_pattern` (a directory
+/// name with a newline would otherwise forge extra decision lines).
 pub fn anchored_pattern(boundary: &std::path::Path, candidate: &std::path::Path) -> Option<String> {
     let rel = candidate.strip_prefix(boundary).ok()?;
-    Some(format!("/{}", rel.to_string_lossy()))
+    let pattern = format!("/{}", rel.to_string_lossy());
+    (valid_pattern(&pattern) && representable_path(&pattern)).then_some(pattern)
 }
 
 /// The exact pending-marker line appended for a still-undecided
@@ -240,7 +332,8 @@ pub fn parse_anchored_exact_patterns(text: &str) -> std::vec::Vec<String> {
                 .strip_prefix('+')
                 .or_else(|| trimmed.strip_prefix('?'))?;
             let pattern = rest.trim_start();
-            (pattern.starts_with('/') && !pattern.contains("**")).then(|| pattern.to_string())
+            (pattern.starts_with('/') && !pattern.contains("**") && valid_pattern(pattern))
+                .then(|| pattern.to_string())
         })
         .collect()
 }
@@ -275,6 +368,116 @@ pub fn toggle_or_replace_pending(text: &str, pattern: &str, decision_line: &str)
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn regular_file_io_refuses_symlinks_and_special_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("bashrc");
+        std::fs::write(&target, "orig\n").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(read_regular_file(&link), None);
+        assert!(open_regular_file(&link, true).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "orig\n");
+
+        let zero = dir.path().join("zero");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        assert_eq!(read_regular_file(&zero), None);
+        assert_eq!(read_regular_file(Path::new("/dev/null")), None);
+
+        let fifo = dir.path().join("fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_regular_file(&fifo), None, "must not block on open");
+        assert!(open_regular_file(&fifo, true).is_err());
+
+        let subdir = dir.path().join("as_dir");
+        std::fs::create_dir(&subdir).unwrap();
+        assert_eq!(read_regular_file(&subdir), None);
+
+        let big = dir.path().join("big");
+        std::fs::write(&big, vec![b'#'; MAX_DECISION_FILE_BYTES as usize + 1]).unwrap();
+        assert_eq!(read_regular_file(&big), None);
+    }
+
+    #[test]
+    fn regular_file_io_reads_appends_and_creates() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decisions");
+        assert_eq!(read_regular_file(&path), None);
+        open_regular_file(&path, true).unwrap().write_all(b"+ a\n").unwrap();
+        open_regular_file(&path, true).unwrap().write_all(b"+ b\n").unwrap();
+        assert_eq!(read_regular_file(&path).as_deref(), Some("+ a\n+ b\n"));
+    }
+
+    #[test]
+    fn parse_lines_never_panics_and_skips_invalid_lines() {
+        let text = "\u{feff} + a\n\u{e9} b\n\u{2192} c\n+ /../x\n- ./y\n+\n?\n+ z\n";
+        let parsed: Vec<(bool, String)> = parse_lines(text)
+            .into_iter()
+            .map(|l| (l.convert, l.pattern))
+            .collect();
+        assert_eq!(parsed, vec![(true, "a".into()), (true, "z".into())]);
+    }
+
+    #[test]
+    fn valid_pattern_rejects_dot_components_and_control_chars() {
+        for bad in ["/..", "/../x", "a/../b", "./a", "/a/.", "a\nb", "a\rb", "a\tb"] {
+            assert!(!valid_pattern(bad), "{bad:?}");
+        }
+        for good in ["node_modules", "/build", "/a/**/b", "/.venv", "..a", "a..b"] {
+            assert!(valid_pattern(good), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn a_dot_dot_plus_line_never_resolves_outside_its_directory() {
+        assert_eq!(
+            resolve_in_file(Path::new("/proj"), "+ /../victim\n", Path::new("/proj/../victim")),
+            None
+        );
+    }
+
+    #[test]
+    fn representable_path_accepts_ordinary_paths_only() {
+        for good in ["/", "/home/u/proj", "node_modules", "/a/.venv", "/a b/c"] {
+            assert!(representable_path(good), "{good:?}");
+        }
+        for bad in ["/a\nb", "/a\tb", "/a/ b", "/a/b ", "/a/./b", "/a/../b", "/a/**", "/a//b", ""] {
+            assert!(!representable_path(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn anchored_pattern_none_for_whitespace_edged_or_wildcard_names() {
+        for name in ["build ", " build", "**"] {
+            assert_eq!(
+                anchored_pattern(Path::new("/proj"), &Path::new("/proj/a").join(name)),
+                None,
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_pattern_none_for_a_name_with_a_newline() {
+        assert_eq!(
+            anchored_pattern(
+                Path::new("/proj"),
+                Path::new("/proj/a\n+ node_modules\n#/node_modules")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_anchored_exact_patterns_skips_invalid_patterns() {
+        assert_eq!(
+            parse_anchored_exact_patterns("+ /../x\n? /a/./b\n+ /ok\n"),
+            vec!["/ok".to_string()]
+        );
+    }
 
     #[test]
     fn anchored_pattern_matches_only_the_exact_location() {

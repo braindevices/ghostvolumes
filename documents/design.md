@@ -208,14 +208,19 @@ locking crate, usable directly from the dependency-free shim too (no
 shim hand-declares). The one place that needed a *cross-component*
 lock rather than just a same-file one: the shim's subvolume creation
 and `convert`'s directory swap must never run against the same project
-boundary at once (a build writing into a directory `convert` is mid
--swapping could have its output silently land in `convert`'s
-to-be-deleted backup, unrecoverable data loss) — a per-boundary lock
+boundary at once (the shim creating a subvolume `convert` is about to
+swap in or out) — a per-boundary lock
 file (path derived by percent-encoding the boundary, so it stays
 human-inspectable rather than an opaque hash) that the shim takes
 non-blocking (never risk freezing a host build on a lock) and
 `convert` takes blocking (an explicit, occasional, human-run command
-can afford to wait).
+can afford to wait). The lock only covers the shim's `mkdir`
+interception, **not ordinary writes**: a build or IDE writing into a
+directory while `convert` copies it can have those writes land in the
+old copy after `cp` has passed them. That's why `convert` keeps the
+old copy (`.<name>.ghostvolumes-convert-old.<time>/<name>`, git-ignored and reflinked, so free until
+it diverges) unless told to delete it — stop anything writing into a
+directory before converting it.
 
 **`project-roots.list` (renamed from `project-roots.txt`) is
 persistent user data, not a disposable compiled artifact like
