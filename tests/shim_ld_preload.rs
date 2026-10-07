@@ -53,16 +53,15 @@ fn compiled_mkdirat_probe() -> &'static Path {
         std::fs::write(
             &src,
             r#"
+            use std::os::fd::AsRawFd;
+            // No hand-declared `open`: rustc rejects one that isn't variadic.
             unsafe extern "C" {
-                fn open(path: *const i8, flags: i32) -> i32;
                 fn mkdirat(dirfd: i32, path: *const i8, mode: u32) -> i32;
             }
             fn main() {
-                let dir = std::ffi::CString::new(std::env::args().nth(1).unwrap()).unwrap();
+                let dir = std::fs::File::open(std::env::args().nth(1).unwrap()).expect("open failed");
                 let name = std::ffi::CString::new(std::env::args().nth(2).unwrap()).unwrap();
-                let fd = unsafe { open(dir.as_ptr(), 0o200000) };
-                assert!(fd >= 0, "open failed");
-                let rc = unsafe { mkdirat(fd, name.as_ptr(), 0o755) };
+                let rc = unsafe { mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o755) };
                 std::process::exit(if rc == 0 { 0 } else { 1 });
             }
             "#,
