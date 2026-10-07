@@ -15,7 +15,8 @@ use std::os::unix::fs::MetadataExt;
 // accepted (not required) on the shim's own `--edition 2021`
 // compilation, so one spelling works for both contexts.
 unsafe extern "C" {
-    fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
+    // Variadic like libc's; rustc rejects mismatched runtime symbols.
+    fn ioctl(fd: std::ffi::c_int, request: std::ffi::c_ulong, ...) -> std::ffi::c_int;
 }
 
 const BTRFS_PATH_NAME_MAX: usize = 4087;
@@ -77,7 +78,7 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
     let rc = unsafe {
         ioctl(
             parent_dir.as_raw_fd(),
-            request,
+            request as std::ffi::c_ulong,
             &mut args as *mut BtrfsIoctlVolArgs as *mut std::ffi::c_void,
         )
     };
