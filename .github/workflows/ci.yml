@@ -41,14 +41,15 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  # The oldest toolchain Cargo.toml's rust-version claims (File::lock).
+  # The oldest toolchain Cargo.toml's rust-version claims: the highest
+  # rust-version among locked dependencies (vergen 10 needs 1.95).
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.95"
       - name: cargo check on the minimum supported Rust version
         run: cargo check --locked --all-targets
 

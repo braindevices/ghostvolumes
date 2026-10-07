@@ -73,7 +73,7 @@ The owner's decisions are recorded in the plan: Q1 keep the backup (reflinked, d
 
 ## 5. Not verified / open
 
-- **`rust-version = "1.89"`:** there is no 1.89 toolchain here. The new CI `msrv` job will check it on its first run.
+- ~~`rust-version = "1.89"`~~ **Resolved:** the first CI `msrv` run showed `vergen` 10 (build dependency) needs Rust 1.95, so `rust-version` and the `msrv` job are now 1.95. Verified locally with a 1.95 toolchain: `cargo check --locked --all-targets` and the full test suite (393 passed).
 - **New CI configuration** (pinned SHAs, `msrv` job, `toolchain: stable` input): YAML structure checked by eye (no YAML parser available here), and `bump-action-pins.sh --check` passes. Not run on GitHub yet.
 - **Untested branches:** the rollback after a failed second rename (needs a hook between the two renames), and `register`'s control-character check from the `convert` path (unit-tested in `projects::register` itself).
 - **Root-only test:** `a_data_dir_owned_by_another_user_disables_interception` runs only as root (locally yes, in CI it skips).
