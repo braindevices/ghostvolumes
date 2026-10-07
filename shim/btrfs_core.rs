@@ -54,8 +54,13 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
             format!("subvolume name too long: {name}"),
         ));
     }
-    // `std` opens with O_CLOEXEC and closes on drop; no hand-declared
-    // `open` (rustc rejects one that isn't variadic like libc's).
+    // Stands in for O_DIRECTORY: a read-only open of a FIFO parent would
+    // block the host process. `std` opens with O_CLOEXEC and closes on
+    // drop; no hand-declared `open` (rustc rejects one that isn't
+    // variadic like libc's).
+    if !std::fs::metadata(parent)?.is_dir() {
+        return Err(std::io::ErrorKind::NotADirectory.into());
+    }
     let parent_dir = std::fs::File::open(parent)?;
 
     let mut args = BtrfsIoctlVolArgs {
@@ -115,5 +120,21 @@ mod tests {
         let dir = btrfs_scratch_dir();
         let missing_parent = dir.path().join("does-not-exist");
         assert!(create_subvolume(&missing_parent, "x").is_err());
+    }
+
+    #[test]
+    fn fifo_parent_fails_fast_instead_of_blocking() {
+        let dir = btrfs_scratch_dir();
+        let fifo = dir.path().join("fifo");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        // A regression would block in open(); fail via timeout, not a hung test run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(create_subvolume(&fifo, "x")).unwrap());
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("create_subvolume blocked on a FIFO parent")
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
     }
 }
