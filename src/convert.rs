@@ -1140,6 +1140,63 @@ fn decide_with_io(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shadows the real-stdin `convert`/`decide` above, so a test never
+    /// depends on whether `cargo test` itself runs on a TTY (it would
+    /// block on `read_line` there). Any prompt fails the test instead.
+    fn no_stdin() -> Option<String> {
+        panic!("test reached an interactive prompt; use convert_with_io/decide_with_io")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn convert(
+        path: &Path,
+        create: &[PathBuf],
+        max_depth: Option<u32>,
+        config_dir: &Path,
+        cache_path: &Path,
+        project_roots_path: &Path,
+        data_dir: &Path,
+        dry_run: bool,
+    ) -> anyhow::Result<()> {
+        convert_with_io(
+            path,
+            create,
+            max_depth,
+            config_dir,
+            cache_path,
+            project_roots_path,
+            data_dir,
+            dry_run,
+            false,
+            &mut no_stdin,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decide(
+        path: &Path,
+        add: &[String],
+        deny: &[String],
+        max_depth: Option<u32>,
+        config_dir: &Path,
+        cache_path: &Path,
+        project_roots_path: &Path,
+        data_dir: &Path,
+    ) -> anyhow::Result<()> {
+        decide_with_io(
+            path,
+            add,
+            deny,
+            max_depth,
+            config_dir,
+            cache_path,
+            project_roots_path,
+            data_dir,
+            false,
+            &mut no_stdin,
+        )
+    }
     use crate::test_support::btrfs_scratch_dir;
     use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
