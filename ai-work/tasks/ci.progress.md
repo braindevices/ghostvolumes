@@ -121,3 +121,5 @@ None.
 ---
 
 **Steps 1, 2, 3, 4, 6 complete.** Step 5 (confirm green on GitHub Actions) is blocked on this repository having an actual GitHub remote — nothing further to do here until that exists and a branch gets pushed.
+
+**Update 2026-10-08:** the first real GitHub Actions run of `snapper-interop` (run logs `logs_102401777394`, `develop` at e001690, Ubuntu 24.04's snapper 0.10.6) passed every step: `create-config --no-dbus` made `.snapshots` with inode 256, `roots scan` printed the mountpoint, and `scan --save` + reload wrote non-empty `roots.list`/`compiled.tsv`. `continue-on-error: true` removed from the job (snapshot-prune Step 11i).

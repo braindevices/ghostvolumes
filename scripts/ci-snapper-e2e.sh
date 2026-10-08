@@ -84,5 +84,6 @@ sudo -u dev env -i HOME=/home/dev USER=dev LOGNAME=dev LANG=C.UTF-8 \
   # ... and one that died after locking: kept, just tagged.
   m=$(snapper -c src create --read-only --cleanup-algorithm timeline --description pruned --userdata verify=pending --print-number)
   run;                                     [ "$(tag "$m")" = verify=recovered ]
+  grep -q "note: snapshot $m was already locked" /tmp/out
   echo "snapshot-prune e2e: all checks passed"
 '

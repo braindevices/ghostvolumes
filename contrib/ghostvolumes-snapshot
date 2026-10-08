@@ -28,10 +28,12 @@ bad=0
 # prune and lock them. Already read-only (died after locking, exit 3): keep
 # and just tag. Unprunable: lock and tag failed, never delete.
 for p in $(tagged pending); do
-  r=0; ghostvolumes prune --config "$C" --since "$W" "$S/$p/snapshot" || r=$?
+  r=0; ghostvolumes prune --config "$C" --since "$W" "$S/$p/snapshot" 2>"$T/err" || r=$?
+  [ "$r" -eq 3 ] || cat "$T/err" >&2                   # 3's read-only error is expected here
   case $r in
     0|1|4) snapper -c "$C" modify --read-only --userdata verify=recovered "$p";;
-    3) snapper -c "$C" modify --userdata verify=recovered "$p";;
+    3) snapper -c "$C" modify --userdata verify=recovered "$p"
+       echo "note: snapshot $p was already locked when its run died; kept as-is";;
     *) snapper -c "$C" modify --read-only --userdata verify=failed "$p"
        echo "snapshot $p: couldn't be pruned; kept as verify=failed" >&2; bad=1;;
   esac

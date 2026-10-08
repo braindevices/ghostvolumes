@@ -154,13 +154,6 @@ jobs:
   # ai-work/tasks/ci.plan.md's "Snapper interop" section.
   snapper-interop:
     runs-on: ubuntu-24.04
-    # Unlike ubuntu-26.04's continue-on-error above (an external factor - a
-    # preview image with no SLA), this one is here because the exact snapper
-    # CLI behavior (create-config's flags, whether --no-dbus is required in
-    # a non-interactive runner, permissions on the resulting .snapshots)
-    # is researched but not yet run for real anywhere. Drop this once a real
-    # CI run confirms the job as written actually passes.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable

@@ -357,6 +357,11 @@ fn a_run_that_died_after_locking_keeps_its_snapshot() {
     assert!(env.snap(1).exists(), "kept: {out}");
     assert_eq!(env.verify_tag(1), "verify=recovered");
     assert_eq!(env.verify_tag(2), "verify=ok");
+    // Expected here, so a note, not prune's read-only error.
+    assert!(
+        out.contains("note: snapshot 1 was already locked") && !out.contains("read-only;"),
+        "{out}"
+    );
 }
 
 #[test]

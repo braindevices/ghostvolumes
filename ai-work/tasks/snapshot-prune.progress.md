@@ -344,8 +344,31 @@ None.
 ### What was done
 - First CI run of `snapshot-prune-e2e` (snapper 0.13.2 from OBS installed and the key pin passed) failed: `Error: /home/runner/.config/ghostvolumes/vcs.toml: Permission denied`, git warnings about `/home/runner/.config/git/*`, snapshot 1 `verify=failed`. `sudo -u dev -H` kept the runner's `XDG_CONFIG_HOME`; `-H` resets only `HOME`.
 - `scripts/ci-snapper-e2e.sh` now runs the `dev` shell under `env -i` with only HOME/USER/LOGNAME/LANG/PATH.
-- Verified locally by simulating the leak (`XDG_CONFIG_HOME=/home/runner/.config sudo -u nobody env -i …`): it's unset inside; `bash -n` ok. Needs the next CI run to confirm.
+- Verified locally by simulating the leak (`XDG_CONFIG_HOME=/home/runner/.config sudo -u nobody env -i …`): it's unset inside; `bash -n` ok. Confirmed by the owner's next CI run: `snapshot-prune-e2e` passes against snapper 0.13.2 (all assertions, including real `--jsonout` baseline lookup, recovery of a writable and of a read-only pending snapshot, and the repeated in-window `p/notes` warning on snapshots 5, 6 and 8 as designed).
 ### Deviations from plan
 None.
 ### Issues found / fixed
 - The pipeline behaved fail-safe: unreadable config → exit 2 → snapshot locked and tagged `failed`, the before-manifest failure was reported and pruning was not attempted silently.
+
+## Step 11i — `snapper-interop` CI job no longer allowed to fail
+**Status**: done
+**Date**: 2026-10-08
+### What was done
+- Checked the owner's CI log archive (`gh-action-logs/logs_102401777394.zip`, `develop` at e001690): all six jobs (lint incl. shellcheck, msrv, test 24.04/26.04, snapshot-prune-e2e, snapper-interop) have no `##[error]`; tests 802 passed, 0 failed across both test jobs. `snapper-interop` passed every step against Ubuntu's snapper 0.10.6.
+- Removed its `continue-on-error: true` and the comment that said to drop it once a real run passed.
+### Deviations from plan
+None.
+### Issues found / fixed
+None.
+
+## Step 11j — read-only recovery prints a note, not prune's error
+**Status**: done
+**Date**: 2026-10-08
+### What was done
+- Owner request after the first green CI run: recovering a snapshot whose run died after locking printed prune's exit-3 error ("is read-only; prune needs a writable snapshot") to the journal, though it's the expected case. The recovery loop now holds prune's stderr in the private temp dir, shows it unless the exit is 3, and on 3 prints `note: snapshot N was already locked when its run died; kept as-is` (stdout).
+- `a_run_that_died_after_locking_keeps_its_snapshot` asserts the note and the absence of the error (failed before the fix); the CI e2e greps for the note.
+- Fake and real snapper (dev build 0.13.0): 13/13; full suite 397 pass, clippy clean, scratch dir empty.
+### Deviations from plan
+None.
+### Issues found / fixed
+- In recovery, prune's other stderr (refusals, warnings) now prints after its stdout instead of interleaved; acceptable for a leftover's recovery.
