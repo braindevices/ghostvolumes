@@ -1,6 +1,5 @@
-//! Opt-in: exercises the shared BTRFS primitives (`shim/btrfs_core.rs`
-//! — the exact same file the LD_PRELOAD shim uses, not a
-//! reimplementation) against a throwaway loopback-mounted image, so
+//! Opt-in: exercises the shared BTRFS primitives (`src/btrfs_core.rs`
+//! — the production file itself, not a reimplementation) against a throwaway loopback-mounted image, so
 //! these tests are fully self-contained rather than depending on the
 //! test machine already having a BTRFS filesystem mounted somewhere
 //! (unlike the rest of the suite's `btrfs_scratch_dir()` helper).
@@ -24,9 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// Compiles the probe once (via bare `rustc`, same as the shim itself)
+/// Compiles the probe once (via bare `rustc`)
 /// and reuses it across every test in this file. The probe
-/// `include!`s the real `shim/btrfs_core.rs` — an absolute path baked
+/// `include!`s the real `src/btrfs_core.rs` — an absolute path baked
 /// into the generated source, since the probe's `.rs` file lives in a
 /// tempdir far from the repo — so these tests exercise the actual
 /// production code, not a hand-copied stand-in.
@@ -38,7 +37,7 @@ fn compiled_probe() -> &'static Path {
             std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("btrfs-loopback-probe.rs");
         let source = format!(
             r#"
-            include!("{manifest_dir}/shim/btrfs_core.rs");
+            include!("{manifest_dir}/src/btrfs_core.rs");
 
             fn main() {{
                 let args: Vec<String> = std::env::args().collect();

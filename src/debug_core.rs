@@ -1,7 +1,5 @@
-// Leveled verbosity, shared (via `include!`/`mod`) between the CLI and
-// the dependency-free LD_PRELOAD shim. Pure parsing/ordering, no I/O:
-// the shim must never touch stdout/stderr, so sink handling stays
-// separate in each binary.
+// Leveled verbosity: pure parsing/ordering, no I/O (sink handling is in
+// src/debug.rs). Spliced into src/debug.rs via `include!`.
 
 /// Ordered `Error < Warn < Info < Debug < Trace` - a message at `level`
 /// is shown whenever `level <= configured_verbosity()`, so raising
@@ -43,8 +41,8 @@ pub fn format_line(level: Verbosity, message: &str) -> String {
 }
 
 /// Renders `time` as `YYYY-MM-DDTHH:MM:SS.mmmZ` (ISO 8601, UTC,
-/// millisecond precision), hand-rolled since the shim can't link
-/// `chrono`/`time`. Takes `time` explicitly to stay pure/testable.
+/// millisecond precision), hand-rolled (no date crate needed for one
+/// format). Takes `time` explicitly to stay pure/testable.
 fn iso8601_utc_millis(time: std::time::SystemTime) -> String {
     let since_epoch = time
         .duration_since(std::time::UNIX_EPOCH)

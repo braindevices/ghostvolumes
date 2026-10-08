@@ -1,0 +1,26 @@
+#!/bin/sh
+# Source from ~/.profile (or run at login): warns when the newest pruned
+# snapshot needs attention, the timer has stopped, or events.log has news.
+#   . ghostvolumes-login-check src
+ghostvolumes_login_check() {
+  # Decision changes (what prune newly prunes), kept until you delete the file.
+  _gv_ev=${XDG_STATE_HOME:-$HOME/.local/state}/ghostvolumes/events.log
+  [ ! -s "$_gv_ev" ] ||
+    echo "ghostvolumes: $(wc -l <"$_gv_ev") event(s) in $_gv_ev (read it, then delete it)" >&2
+  unset _gv_ev
+  # Newest snapshot this tool tagged (milestones without verify= are skipped).
+  _gv_last=$(snapper --csvout -c "${1:-src}" list --columns number,date,userdata 2>/dev/null |
+    awk -F, '$1 ~ /^[0-9]+$/ && /verify=/' | tail -n 1 | tr -d '\000-\037\177')
+  [ -n "$_gv_last" ] || return 0
+  _gv_age=$(( $(date +%s) - $(date -d "$(printf '%s' "$_gv_last" | cut -d, -f2)" +%s 2>/dev/null || date +%s) ))
+  case $_gv_last in
+    *verify=ok*|*verify=refused*|*verify=health-timeout*|*verify=recovered*|*verify=rules-changed*) ;;
+    *verify=pending*) [ "$_gv_age" -lt 1800 ] ||
+        echo "ghostvolumes: snapshot run stuck since: $_gv_last" >&2 ;;   # young = running now
+    *) echo "ghostvolumes: latest snapshot of '${1:-src}' needs attention: $_gv_last" >&2 ;;
+  esac
+  [ "$_gv_age" -le 7200 ] ||
+    echo "ghostvolumes: no snapshot of '${1:-src}' for over 2 h — is ghostvolumes-snapshot@${1:-src}.timer running?" >&2
+  unset _gv_last _gv_age
+}
+ghostvolumes_login_check "$@"

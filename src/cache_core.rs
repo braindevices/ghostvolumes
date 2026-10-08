@@ -1,12 +1,8 @@
 // Reader + matcher for the flat `compiled.tsv` cache format (§8.0).
-// Dependency-free (`std` only), shared between the CLI (`include!`) and
-// the shim (`mod`). The writer (`compile()`) stays in `src/cache.rs`
-// only, since it needs `MergedConfig` — the shim never writes this
-// file, only reads it. Rows are plain `(prefix, name)` pairs.
-
-// Fully-qualified paths throughout, not `use` at file scope: this file
-// is included both mid-file into src/cache.rs and as its own `mod` in
-// the shim, two different scopes a bare `use` here can't serve both of.
+// `std` only, spliced into src/cache.rs via `include!` (a leftover of
+// the retired shim, which compiled it standalone); the writer lives in
+// src/cache.rs. Rows are plain `(prefix, name)` pairs. Fully-qualified
+// paths throughout, since it's spliced mid-file.
 
 /// Parses `compiled.tsv` text back into `(prefix, name)` pairs —
 /// `str::split_once('\t')` per line, no external crate.
@@ -20,9 +16,7 @@ pub fn parse(text: &str) -> Vec<(String, String)> {
 }
 
 /// The names that apply to `path`: the union of every row whose prefix
-/// is an ancestor-or-self of `path`. This is the shim's reactive
-/// matching logic; dead code from the main crate's own perspective but
-/// alive via the shim's separate `mod`-based compilation.
+/// is an ancestor-or-self of `path`.
 #[allow(dead_code)]
 pub fn names_for(
     rows: &[(String, String)],

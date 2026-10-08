@@ -11,7 +11,7 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 
-// Edition 2024 (both the CLI crate and the shim) requires `unsafe extern`.
+// Edition 2024 requires `unsafe extern`.
 unsafe extern "C" {
     // Variadic like libc's; rustc rejects mismatched runtime symbols.
     fn ioctl(fd: std::ffi::c_int, request: std::ffi::c_ulong, ...) -> std::ffi::c_int;
@@ -45,8 +45,7 @@ pub fn is_subvolume(path: &std::path::Path) -> std::io::Result<bool> {
 }
 
 /// Creates a new subvolume named `name` directly inside `parent`
-/// (which must already exist) via `BTRFS_IOC_SUBVOL_CREATE`. CLI-only;
-/// the shim uses `create_subvolume_in` on the directory it resolved.
+/// (which must already exist) via `BTRFS_IOC_SUBVOL_CREATE`.
 #[allow(dead_code)]
 pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result<()> {
     // Stands in for O_DIRECTORY: a read-only open of a FIFO parent would
@@ -59,9 +58,9 @@ pub fn create_subvolume(parent: &std::path::Path, name: &str) -> std::io::Result
     create_subvolume_in(&std::fs::File::open(parent)?, name)
 }
 
-/// `create_subvolume` on an already-open parent directory — the shim
-/// creates in exactly the directory it resolved and decided on, so a
-/// path component swapped in between can't redirect it.
+/// `create_subvolume` on an already-open parent directory, so the
+/// subvolume lands in exactly that directory even if a path component is
+/// swapped in between.
 pub fn create_subvolume_in(parent_dir: &std::fs::File, name: &str) -> std::io::Result<()> {
     if name.len() > BTRFS_PATH_NAME_MAX {
         return Err(std::io::Error::new(

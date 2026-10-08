@@ -1,6 +1,6 @@
 //! `ghostvolumes projects list/register/unregister`: manages the
 //! project-roots list, a flat text file giving the decision-file walk-up
-//! a narrower stopping boundary. CLI-only; the shim never writes it.
+//! a narrower stopping boundary. Read by `prune` to know which projects to prune.
 //!
 //! Every mutation holds `project-roots.lock` for its whole
 //! read-modify-write sequence, so a concurrent `unregister` rewrite can
@@ -54,7 +54,7 @@ pub fn register(list_path: &Path, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Rewrites existing entries to their physical paths (what the shim
+/// Rewrites existing entries to their physical paths (what `prune` and the kernel
 /// sees), deduplicated in order — entries registered before paths were
 /// canonicalized at registration, e.g. under a `/home` -> `/var/home`
 /// symlink, would otherwise never match. Only *ancestors* are resolved:
@@ -76,7 +76,7 @@ pub fn canonicalize_entries(list_path: &Path) -> anyhow::Result<()> {
         {
             eprintln!(
                 "warning: registered project {entry} is itself a symlink - kept as written, \
-                 but the shim matches real paths, so it won't apply there"
+                 but `prune` maps projects by real paths, so it won't be pruned"
             );
             entry.clone()
         } else {

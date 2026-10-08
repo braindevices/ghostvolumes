@@ -1,8 +1,6 @@
 // XDG base directory resolution (§2): `~/.config/ghostvolumes` and
 // `~/.local/share/ghostvolumes` by default, honoring `XDG_CONFIG_HOME`/
-// `XDG_DATA_HOME`. Shared between CLI and shim — the shim MUST resolve
-// `compiled.tsv`'s path exactly like `reload`/`init` do, or risk
-// silently reading the wrong (or no) file.
+// `XDG_DATA_HOME`. Spliced into src/xdg.rs via `include!`.
 
 pub fn config_dir_from(home: &str, xdg_config_home: Option<&str>) -> std::path::PathBuf {
     match xdg_config_home {
@@ -19,6 +17,16 @@ pub fn data_dir_from(home: &str, xdg_data_home: Option<&str>) -> std::path::Path
         _ => std::path::Path::new(home)
             .join(".local")
             .join("share")
+            .join("ghostvolumes"),
+    }
+}
+
+pub fn state_dir_from(home: &str, xdg_state_home: Option<&str>) -> std::path::PathBuf {
+    match xdg_state_home {
+        Some(dir) if !dir.is_empty() => std::path::Path::new(dir).join("ghostvolumes"),
+        _ => std::path::Path::new(home)
+            .join(".local")
+            .join("state")
             .join("ghostvolumes"),
     }
 }
@@ -40,6 +48,18 @@ mod tests {
         assert_eq!(
             data_dir_from("/home/user1", None),
             std::path::PathBuf::from("/home/user1/.local/share/ghostvolumes")
+        );
+    }
+
+    #[test]
+    fn state_dir_defaults_to_dot_local_state_and_honors_the_override() {
+        assert_eq!(
+            state_dir_from("/home/user1", None),
+            std::path::PathBuf::from("/home/user1/.local/state/ghostvolumes")
+        );
+        assert_eq!(
+            state_dir_from("/home/user1", Some("/s")),
+            std::path::PathBuf::from("/s/ghostvolumes")
         );
     }
 

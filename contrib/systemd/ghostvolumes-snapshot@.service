@@ -1,0 +1,14 @@
+# Instance = snapper config name; its subvolume is set in a drop-in:
+#   systemctl --user edit ghostvolumes-snapshot@src.service
+#   [Service]
+#   Environment=SUBVOLUME=%h/src
+[Unit]
+Description=Pruned Snapper snapshot of %i
+OnFailure=ghostvolumes-notify@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ghostvolumes-snapshot %i ${SUBVOLUME}
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=30min

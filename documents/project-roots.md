@@ -33,4 +33,4 @@ $ ghostvolumes projects unregister
 - A missing TTY at any of these checks aborts rather than guessing.
 - `$XDG_DATA_HOME/ghostvolumes/project-roots.list` a plain-text file one path per line.
 - `project-roots.list` and `compiled.tsv` decide decision merge boundaries. It's persistent user data (unlike the disposable `compiled.tsv`) backing it up but don't hand-edit it directly
-- Use `ghostvolumes projects register`/`unregister` so a live edit never races the shim's or CLI's own reads and writes of it.
+- Use `ghostvolumes projects register`/`unregister` so a live edit never races the CLI's own reads and writes of it. `prune` doesn't use project roots at all: it prunes the whole snapshot by its decision files.

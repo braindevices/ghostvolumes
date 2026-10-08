@@ -2,6 +2,19 @@
 
 Notable changes to this project, loosely following [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+**Breaking: the `LD_PRELOAD` shim is retired; GhostVolumes now prunes Snapper snapshots instead.** See [snapshot-prune.md](documents/snapshot-prune.md).
+
+- **Added** `prune` (delete decided volatile dirs inside a writable Snapper snapshot, with guards against escaping the snapshot, VCS metadata, tracked files, and — in git repos — anything not ignored), `vcs-manifest` (before/after proof that VCS metadata is untouched), `vcs-health` (per-VCS health command, only for repos Snapper reports as changed), `contrib` (prints the bundled snapshot script, systemd units and login check), and `vcs.toml` per-VCS settings.
+- **Added** `prune --config <c> --since <1d|UTC time>`: compares with the oldest snapshot this tool pruned within the window before the snapshot's own date (from `snapper --jsonout list`), and reports what the snapshot's decisions prune that the earlier snapshot's decisions wouldn't (same tree, so any widening change counts: new `+`, removed `-`, reordering, a new repo); appends it to `~/.local/state/ghostvolumes/events.log` before deleting (reported by the login check until deleted) and exits 4; the timer script (`SINCE`, default `1d`) tags such snapshots `verify=rules-changed`. A change is reported by every run in the window. Pruning still applies them, and each snapshot is pruned only by its own decision files. New dependency: `serde_json`.
+- **Changed** the timer script never deletes a snapshot: one `prune` can't handle is locked and tagged `verify=failed` (alerts), in one `snapper modify` with the lock. A failed `vcs-manifest` no longer leaves the snapshot unpruned: it prunes, runs health and tags `failed`. The CI pins the OBS key fingerprint.
+- **Breaking:** `prune` no longer reads `.ghostvolumes-ignore` (`convert`/`decide` still do) or `project-roots.list`: the whole managed subvolume is pruned by its decision files alone, each applying to everything below it (a `~/src/.ghostvolumes-decisions` reaches every repo). Use a `-` decision to keep a path. **After upgrading, read `events.log`:** the first run lists everything now pruned, including directories with decision files that were never registered and parent rules reaching child repos.
+- **Changed** `prune` only accepts a real snapshot (`<subvolume>/.snapshots/<n>/snapshot`, a subvolume root; `--subvolume` is gone) and refuses a run with a real subvolume or another filesystem inside it.
+- **Added** `discover` suggestions for `CACHEDIR.TAG` dirs.
+- **Removed** `intercept`, `shell-init`, the build-time shim compile and the shim install; `init` deletes a leftover `libghostvolumes_shim.so`.
+- **Changed** `convert` keeps a reflinked, git-ignored backup by default (`--delete-backup` / `delete-convert-backup = true` to delete); `rust-version` is 1.95; many audit fixes (path escapes, symlinked decision files, parser panics, line-format injection) — see `ai-work/audit-2026-10-06.md` and `documents/security.md`.
+
 ## 0.3.2 — 2026-07-16
 
 - **Added** a branch-based SemVer pre-release suffix to `ghostvolumes --version`, on top of 0.3.1's `git describe` output — this project's GitFlow-shaped branches (`.github/workflows/ci.yml`: `main` = release, `develop` = pre-release, plus `hotfix/*`/`feature/*`) map onto `-alpha` (`develop`), `-rc` (`hotfix/*`), `-dev` (anything else), or no suffix at all (`main`/`master`/detached HEAD). `git describe`'s own "commits past the last tag" count alone can't distinguish which branch a build came from — e.g. `0.3.2-alpha (v0.3.1-3-gabc1234)` on `develop` vs. `0.3.2 (v0.3.1)` on `main`. Computed independently in `build.rs` via its own `git rev-parse --abbrev-ref HEAD` call, since `vergen-gitcl`'s own branch detection only surfaces as a `cargo:rustc-env` var for the *final crate*, not readable back mid-build-script.

@@ -1,1 +1,1 @@
-include!("../shim/lock_core.rs");
+include!("lock_core.rs");

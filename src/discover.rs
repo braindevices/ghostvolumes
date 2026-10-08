@@ -119,7 +119,10 @@ fn walk_inner(
             continue;
         }
 
-        let is_watched = watched_names.iter().any(|w| w == name_str.as_ref());
+        // A tool-tagged cache dir is suggested like a watched name — only
+        // suggested: anyone can commit a CACHEDIR.TAG into source.
+        let is_watched =
+            watched_names.iter().any(|w| w == name_str.as_ref()) || has_cache_dir_tag(&path);
         let is_subvolume = btrfs::is_subvolume(&path).unwrap_or(false);
 
         if is_watched || is_subvolume {
@@ -149,6 +152,14 @@ fn walk_inner(
             matches,
         );
     }
+}
+
+/// `dir/CACHEDIR.TAG` starts with the Cache Directory Tagging signature
+/// (https://bford.info/cachedir/) — what Cargo's `target`, `uv venv` and
+/// others write.
+fn has_cache_dir_tag(dir: &Path) -> bool {
+    crate::decision::read_regular_file(&dir.join("CACHEDIR.TAG"))
+        .is_some_and(|t| t.starts_with("Signature: 8a477f597d28d172789f06886806bc55"))
 }
 
 #[derive(Default)]
@@ -741,6 +752,29 @@ mod tests {
             vec!["weird-name".to_string()]
         );
         assert_eq!(suggestions[0].not_yet_converted, vec!["target".to_string()]);
+    }
+
+    #[test]
+    fn a_valid_cachedir_tag_makes_a_dir_a_suggestion_but_a_fake_one_doesnt() {
+        let dir = tempfile::tempdir().unwrap();
+        let tagged = dir.path().join("p/whatever-cache");
+        let fake = dir.path().join("p/notes");
+        std::fs::create_dir_all(&tagged).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(
+            tagged.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n# by a tool\n",
+        )
+        .unwrap();
+        std::fs::write(fake.join("CACHEDIR.TAG"), "not a signature\n").unwrap();
+
+        let matches = walk(dir.path(), None, &[], &[], &[]);
+        let names: Vec<&str> = matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["whatever-cache"]);
+        assert!(
+            matches!(matches[0].kind, MatchKind::NotYetConverted),
+            "only suggested"
+        );
     }
 
     #[test]

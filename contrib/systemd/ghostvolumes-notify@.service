@@ -1,0 +1,9 @@
+# Alert for a failed ghostvolumes-snapshot run. The journal entry always
+# survives; notify-send only works with a graphical session.
+[Unit]
+Description=Alert: %i failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-cat -t ghostvolumes -p crit /bin/echo "%i failed: journalctl --user -u %i"
+ExecStart=-/usr/bin/notify-send -u critical "%i failed" "journalctl --user -u %i"

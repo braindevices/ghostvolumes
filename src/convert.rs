@@ -237,8 +237,7 @@ fn lock_decisions(data_dir: &Path, boundary: &Path) -> anyhow::Result<std::fs::F
 }
 
 /// Appends a `? <pattern>` pending-marker line noting `candidate` as
-/// still undecided — the same mechanism the shim uses, so a candidate
-/// `convert` can't ask about (no TTY) leaves a trail a human can later
+/// still undecided, so a candidate `convert` can't ask about (no TTY) leaves a trail a human can later
 /// turn into a real `+`/`-` line by hand.
 fn append_pending_marker(data_dir: &Path, boundary: &Path, candidate: &Path) -> anyhow::Result<()> {
     let Some(pattern) = decision::anchored_pattern(boundary, candidate) else {
@@ -262,7 +261,7 @@ fn append_pending_marker(data_dir: &Path, boundary: &Path, candidate: &Path) -> 
 /// broader pattern than the marker it supersedes. Falls back to a plain
 /// append if there was no pending marker. Rewrites the whole file
 /// atomically under `lock_decisions`, so a reader never sees a
-/// half-written file and this can't race a concurrent shim append.
+/// half-written file and this can't race a concurrent append.
 fn record_decision(
     data_dir: &Path,
     boundary: &Path,
@@ -344,9 +343,9 @@ fn create_empty(target: &Path) -> anyhow::Result<()> {
         .into_owned();
     std::fs::create_dir_all(parent)?;
 
-    // AlreadyExists is tolerated: the shim could have won a race and
-    // created it just before this call took the lock, but the desired
-    // end state (target is a subvolume) still holds either way.
+    // AlreadyExists is tolerated: something else (another `convert`, or
+    // a subvolume made by hand) could have created it just before this
+    // call took the lock; the desired end state still holds either way.
     match btrfs::create_subvolume(parent, &name) {
         Ok(()) => {
             println!("create: {} (new empty subvolume)", target.display());
@@ -491,8 +490,8 @@ fn copy_and_swap_with(
 }
 
 /// Blocking-locks `boundary`'s per-project lock file
-/// around the create/copy/rename sequence — coordinates with the shim's
-/// own (non-blocking) lock on the same boundary. Blocking is fine here
+/// around the create/copy/rename sequence, so two `convert` runs on one
+/// project never swap the same directory at once. Blocking is fine here
 /// since `convert` is a human-run command. Held only around this
 /// operation, not the "remember this?" prompt before it.
 fn materialize(
@@ -518,7 +517,7 @@ fn materialize(
 /// real directory (not a symlink, which could point anywhere), and
 /// `target` itself a real directory if it exists. Missing components
 /// are fine — `create_empty` creates them.
-fn check_contained(target: &Path, boundary: &Path) -> anyhow::Result<()> {
+pub(crate) fn check_contained(target: &Path, boundary: &Path) -> anyhow::Result<()> {
     use std::path::Component;
     let refuse = |why: &str| anyhow::anyhow!("refusing {}: {why}", target.display());
     let rel = target
@@ -2237,7 +2236,7 @@ mod tests {
 
     #[test]
     fn create_empty_tolerates_a_target_that_already_exists() {
-        // Simulates the shim winning a race and creating the subvolume
+        // Simulates something else winning a race and creating the subvolume
         // first; create_empty must tolerate this, not error.
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
@@ -3909,7 +3908,7 @@ mod tests {
 
     #[test]
     fn materialize_blocks_while_the_boundary_lock_is_held_then_succeeds() {
-        // Unlike the shim's non-blocking try_lock, materialize blocks.
+        // materialize blocks on the lock (it's a human-run command).
         let scratch = btrfs_scratch_dir();
         let target = scratch.path().join("node_modules");
         let cache_dir = empty_cache();

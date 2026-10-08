@@ -40,6 +40,8 @@ jobs:
         run: cargo fmt --check
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: shellcheck (contrib + CI scripts)
+        run: shellcheck -S warning contrib/ghostvolumes-snapshot contrib/ghostvolumes-login-check scripts/ci-snapper-e2e.sh scripts/bump-action-pins.sh scripts/dev-snapper.sh
 
   # The oldest toolchain Cargo.toml's rust-version claims: the highest
   # rust-version among locked dependencies (vergen 10 needs 1.95).
@@ -157,6 +159,24 @@ jobs:
           echo "$output"
           [ "$status" -ne 0 ] || { echo "expected a nonzero exit code"; exit 1; }
           echo "$output" | grep -q "only supports Linux with BTRFS" || { echo "expected message not found"; exit 1; }
+
+  # The snapshot-prune pipeline (contrib/ghostvolumes-snapshot) against a
+  # REAL Snapper >= 0.12 (the snbk generation). Ubuntu ships 0.10.6, so
+  # snapper comes from the openSUSE Build Service repo for Ubuntu
+  # (key-verified), on a loop-mounted throwaway BTRFS image; see
+  # scripts/ci-snapper-e2e.sh.
+  snapshot-prune-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Real Snapper end to end
+        run: scripts/ci-snapper-e2e.sh
 
   # Real interop check: a genuine snapper-managed BTRFS layout (not our own
   # test fixtures simulating the .snapshots convention), verifying `scan`

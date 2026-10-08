@@ -1,8 +1,8 @@
 // Project-roots list (§3): a plain-text file, one path per line, giving
 // the decision-file walk-up a narrower stopping boundary than the
 // broader `roots.d` entries alone. Deliberately not TOML/compiled:
-// read live, same philosophy as decision files (§3, §5). Dependency-free,
-// shared via `include!` (CLI) / `mod` (shim).
+// read live, same philosophy as decision files (§3, §5). Spliced into
+// src/project_roots.rs via `include!`.
 
 /// Strips a single trailing `/` from `path` — except when `path` is
 /// exactly `"/"`, which must keep it — so the same directory compares

@@ -26,4 +26,6 @@ Per-project, committed to the repo they live in — one
 - Resolution walking up from a candidate: the closest enclosing file with a matching pattern wins; within one file, the last matching line wins.
 - `#` is the one prefix reserved for humans — nothing in this tool ever writes or rewrites a `#` line.
 - A later real decision for the *same* pattern replaces a `?` line in place rather than leaving both around — answering "no"/"yes" for `/build/should-review-this` above turns that exact line into `-`/`+ /build/should-review-this`, not a second line underneath it.
-- [`intercept`](intercept.md) never prompts, so an undecided directory gets skipped and a `?` marker appended for later review; [`convert`](convert.md)/[`decide`](decide.md) are where prompting — and turning a `?` into a real decision — happens.
+- Only decision files inside the project count: nothing above the project root, and no global config, ever adds a `+`. No decision file, no pruning.
+- To keep a path that a broader `+` matches (say, a vendored `node_modules`), add a closer `-`: `- /third_party/**/node_modules`. `prune` doesn't read `.ghostvolumes-ignore`.
+- `prune` only ever acts on `+` lines (an undecided or `?` directory is kept in every snapshot); [`convert`](convert.md)/[`decide`](decide.md) are where prompting — and turning a `?` into a real decision — happens.

@@ -1,5 +1,5 @@
 //! Decision-file parsing and matching. Implemented in
-//! `shim/decision_core.rs` (pulled in verbatim below) since it's shared
-//! with the LD_PRELOAD shim.
+//! `decision_core.rs` (pulled in verbatim below; kept separate from the
+//! historical shim split).
 
-include!("../shim/decision_core.rs");
+include!("decision_core.rs");

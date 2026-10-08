@@ -1,11 +1,10 @@
 //! BTRFS primitives: filesystem-type detection (used to validate
-//! configured roots at config-compile time, not on the interception hot
-//! path), plus subvolume detection/creation shared with the shim.
+//! configured roots at config-compile time) plus subvolume detection and creation.
 
 use std::ffi::CString;
 use std::path::Path;
 
-include!("../shim/btrfs_core.rs");
+include!("btrfs_core.rs");
 
 /// `true` iff the filesystem containing `path` is BTRFS, via `statfs`'s
 /// filesystem-type magic number. CLI-only, so free to use `libc`.
@@ -20,6 +19,22 @@ pub fn is_btrfs(path: &Path) -> anyhow::Result<bool> {
     // widen via `i64::from` rather than `as` for portability.
     #[allow(clippy::useless_conversion)]
     Ok(i64::from(stat.f_type) == i64::from(libc::BTRFS_SUPER_MAGIC))
+}
+
+/// `true` iff the subvolume at `path` has BTRFS's read-only flag
+/// (`BTRFS_IOC_SUBVOL_GETFLAGS`), e.g. a Snapper snapshot not created
+/// `--read-write`.
+pub fn is_read_only(path: &Path) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
+    // _IOR(0x94, 25, __u64)
+    let request = ((2u64 << 30) | (8 << 16) | (0x94 << 8) | 25) as libc::c_ulong;
+    let dir = std::fs::File::open(path)?;
+    let mut flags: u64 = 0;
+    if unsafe { libc::ioctl(dir.as_raw_fd(), request, &mut flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(flags & BTRFS_SUBVOL_RDONLY != 0)
 }
 
 #[cfg(test)]

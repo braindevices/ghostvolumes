@@ -59,8 +59,8 @@ fn reload_with_validator(
         }
     }
 
-    // The shim matches on kernel-resolved (physical) paths, so roots are
-    // compiled in that form too, e.g. `/home` -> `/var/home`.
+    // Snapper snapshots and `prune` work on kernel-resolved (physical)
+    // paths, so roots are compiled in that form too (`/home` -> `/var/home`).
     for root in &mut config.roots {
         if let Ok(real) = Path::new(&root.path).canonicalize() {
             root.path = real.display().to_string();

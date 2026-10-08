@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly pruned Snapper snapshot of %i
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""A stand-in for the snapper subcommands contrib/ghostvolumes-snapshot and
+`ghostvolumes prune --since` use, for local end-to-end tests (real snapper
+needs snapperd + root; CI runs it). Snapshots are real BTRFS snapshots made
+with the same ioctls snapper uses. State (date, description, userdata,
+read-only) lives in $FAKE_SNAPPER_SUBVOL/.snapshots. `create` dates a
+snapshot now (UTC), or $FAKE_SNAPPER_DATE ("%F %T") if set."""
+import datetime, fcntl, json, os, shutil, struct, sys
+
+SUB = os.environ["FAKE_SNAPPER_SUBVOL"]
+SNAPS = os.path.join(SUB, ".snapshots")
+STATE = os.path.join(SNAPS, "fake-state.json")
+IOW = lambda nr, size: (1 << 30) | (size << 16) | (0x94 << 8) | nr
+RDONLY = 1 << 1
+
+def load():
+    return json.load(open(STATE)) if os.path.exists(STATE) else {}
+
+def save(state):
+    json.dump(state, open(STATE, "w"))
+
+def set_ro(n, ro):
+    fd = os.open(os.path.join(SNAPS, str(n), "snapshot"), os.O_RDONLY)
+    fcntl.ioctl(fd, IOW(26, 8), struct.pack("Q", RDONLY if ro else 0))
+    os.close(fd)
+
+def walk(root):
+    out = {}
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(d, x)) and x != ".snapshots"]
+        for f in files:
+            p = os.path.join(d, f)
+            st = os.lstat(p)
+            out[os.path.relpath(p, root)] = (st.st_size, st.st_mtime_ns, st.st_ino)
+    return out
+
+args = sys.argv[1:]
+jsonout = False
+while args and args[0] in ("--csvout", "--jsonout", "--utc"):
+    jsonout = jsonout or args[0] == "--jsonout"
+    args = args[1:]
+assert args[0] == "-c", args
+config, cmd, rest = args[1], args[2], args[3:]
+state = load()
+opt = lambda name: rest[rest.index(name) + 1] if name in rest else None
+
+def userdata(text):
+    pairs = [kv.split("=", 1) for kv in text.split(",") if kv]
+    return {k: v for k, v in pairs} or None
+
+if cmd == "list" and jsonout:
+    rows = [{"number": 0, "date": "", "description": "current", "userdata": None, "read-only": False}]
+    for n in sorted(state, key=int):
+        rows.append({"number": int(n), "date": state[n]["date"],
+                     "description": state[n]["description"],
+                     "userdata": userdata(state[n]["userdata"]),
+                     "read-only": state[n]["read_only"]})
+    print(json.dumps({config: rows}))
+elif cmd == "list":
+    print("number,userdata")
+    print("0,")
+    for n in sorted(state, key=int):
+        print(f"{n},{state[n]['userdata']}")
+elif cmd == "get-config":
+    print(json.dumps({"SUBVOLUME": SUB, "FSTYPE": "btrfs"}))
+elif cmd == "create":
+    n = str(max([0] + [int(k) for k in state]) + 1)
+    os.makedirs(os.path.join(SNAPS, n))
+    src = os.open(SUB, os.O_RDONLY)
+    dst = os.open(os.path.join(SNAPS, n), os.O_RDONLY)
+    flags = 0 if "--read-write" in rest else RDONLY
+    # A mutable buffer: fcntl.ioctl caps immutable arguments at 1024 bytes.
+    args_v2 = bytearray(struct.pack("qQQ32s4040s", src, 0, flags, b"", b"snapshot"))
+    fcntl.ioctl(dst, IOW(23, 4096), args_v2, True)
+    os.close(src); os.close(dst)
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    state[n] = {"userdata": opt("--userdata") or "", "read_only": flags != 0,
+                "description": opt("--description") or "",
+                "date": os.environ.get("FAKE_SNAPPER_DATE") or now}
+    save(state)
+    if "--print-number" in rest:
+        print(n)
+elif cmd == "modify":
+    n = rest[-1]
+    if "--read-only" in rest:
+        set_ro(n, True)
+        state[n]["read_only"] = True
+    if opt("--userdata"):
+        state[n]["userdata"] = opt("--userdata")
+    save(state)
+elif cmd == "delete":
+    n = rest[-1]
+    set_ro(n, False)
+    shutil.rmtree(os.path.join(SNAPS, n))
+    del state[n]
+    save(state)
+elif cmd == "status":
+    a, b = rest[-1].split("..")
+    old = walk(os.path.join(SNAPS, a, "snapshot"))
+    new = walk(os.path.join(SNAPS, b, "snapshot"))
+    lines = []
+    for p in sorted(set(old) | set(new)):
+        if p not in old:
+            lines.append("+.....")
+        elif p not in new:
+            lines.append("-.....")
+        elif old[p] != new[p]:
+            lines.append("c.....")
+        else:
+            continue
+        lines[-1] += " " + os.path.join(SUB, p)
+    open(opt("-o"), "w").write("".join(l + "\n" for l in lines))
+else:
+    sys.exit(f"fake-snapper: unsupported {cmd}")

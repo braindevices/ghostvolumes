@@ -1,5 +1,16 @@
 # GhostVolumes — Design Decisions
 
+> **2026-10: the `LD_PRELOAD` shim is retired.** The current design is
+> snapshot-then-prune: Snapper takes writable snapshots, `prune` deletes
+> decided volatile directories inside them, and the snapshot is locked.
+> See [snapshot-prune.md](snapshot-prune.md), [security.md](security.md)
+> and `ai-work/tasks/snapshot-prune.plan.md` (the decisions and the
+> debates behind them). Sections below that describe the shim
+> (`intercept`, `shell-init`, `preload_guard`, the `rustc`-built cdylib,
+> the per-boundary lock against the shim) are kept as **history**. The
+> decision-file model, `convert`, `decide`, `discover` and project roots
+> are still current.
+
 Why this project is built the way it is. Full detail lives in
 `ai-work/tasks/main-plan.md` (original design) and
 `ai-work/tasks/decision-model.plan.md` (supersedes main-plan.md's

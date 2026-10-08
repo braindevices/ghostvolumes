@@ -1,0 +1,70 @@
+#!/bin/sh
+# Take one pruned Snapper snapshot of a projects subvolume.
+#   ghostvolumes-snapshot <snapper-config> <subvolume>     e.g.  src ~/src
+# Run hourly as the owning user by ghostvolumes-snapshot@.timer. See
+# documents/snapshot-prune.md. Exit 1 = needs attention (systemd OnFailure).
+# Never deletes a snapshot: one that can't be pruned is locked and tagged.
+# SINCE (default 1d): how far back prune compares decisions (see the doc).
+set -eu
+PATH=$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+C=${1:?usage: ghostvolumes-snapshot <snapper-config> <subvolume>}
+S=${2:?usage: ghostvolumes-snapshot <snapper-config> <subvolume>}/.snapshots
+[ -d "$S" ] || { echo "$S doesn't exist: wrong subvolume for snapper config '$C'?" >&2; exit 1; }
+L=${XDG_STATE_HOME:-$HOME/.local/state}/ghostvolumes; mkdir -p "$L"
+exec 9>"$L/$C.lock"; flock -n 9 || exit 0             # one run at a time (timer vs manual)
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT              # private dir: no guessable /tmp names
+# Snapshot numbers, ascending, whose (single-key) userdata is verify=<one of
+# the args, as a prefix>. Tolerates CSV quoting.
+tagged() {
+  snapper --csvout -c "$C" list --columns number,userdata |
+    awk -F, -v tags="$*" '$1 ~ /^[0-9]+$/ {
+      for (i = split(tags, t, " "); i; i--) if (index($0, "verify=" t[i])) { print $1; next } }' |
+    sort -n
+}
+W=${SINCE:-1d}                                        # prune picks the baseline itself
+bad=0
+
+# Leftovers of a run that died. Still writable (snbk never transfers those):
+# prune and lock them. Already read-only (died after locking, exit 3): keep
+# and just tag. Unprunable: lock and tag failed, never delete.
+for p in $(tagged pending); do
+  r=0; ghostvolumes prune --config "$C" --since "$W" "$S/$p/snapshot" || r=$?
+  case $r in
+    0|1|4) snapper -c "$C" modify --read-only --userdata verify=recovered "$p";;
+    3) snapper -c "$C" modify --userdata verify=recovered "$p";;
+    *) snapper -c "$C" modify --read-only --userdata verify=failed "$p"
+       echo "snapshot $p: couldn't be pruned; kept as verify=failed" >&2; bad=1;;
+  esac
+done
+
+prev=$(tagged ok rules-changed | tail -n 1)            # last health-verified: for snapper status
+n=$(snapper -c "$C" create --read-write --cleanup-algorithm timeline \
+     --description pruned --userdata verify=pending --print-number)
+d=$S/$n/snapshot
+# The manifest only proves afterwards that prune's guards held; without it,
+# prune anyway (else the snapshot keeps its volatile data for months) and fail.
+m=0; ghostvolumes vcs-manifest "$d" >"$T/manifest" ||
+  { m=1; echo "vcs-manifest failed: pruning without a before-manifest" >&2; }
+rc=0; ghostvolumes prune --config "$C" --since "$W" "$d" || rc=$?
+new=0; if [ "$rc" -eq 4 ]; then new=1; rc=0; fi       # 4 = decisions changed (events.log)
+# Locked whatever happened, together with the tag a crash right now should
+# leave: `failed` can't be separated from its lock and mistaken for `recovered`.
+if [ "$rc" -gt 1 ] || [ "$m" = 1 ]; then e=failed; else e=pending; fi
+snapper -c "$C" modify --read-only --userdata "verify=$e" "$n"
+if [ "$rc" -le 1 ] && [ "$m" = 0 ]; then
+  ghostvolumes vcs-manifest "$d" | cmp -s - "$T/manifest" || rc=9
+fi
+if [ "$rc" -le 1 ]; then
+  set --                                                # snapper's own comparison; on any
+  if [ -n "$prev" ] && snapper -c "$C" status -o "$T/changes" "$prev..$n"; then  # failure,
+    set -- --changes "$T/changes"                      # no --changes → every repo checked
+  fi
+  ghostvolumes vcs-health "$d" "$@" || rc=$((10 + $?))  # 1 = failed, 2 = only timeouts
+fi
+case $rc in 0) t=ok;; 1) t=refused;; 9) t=manifest-changed;;
+  11) t=health-failed;; 12) t=health-timeout;; *) t=failed;; esac
+case $m$t in 1ok|1refused|1health-timeout) t=failed;; esac  # no proof: health still ran
+case $new$t in 1ok|1refused) t=rules-changed;; esac  # failures and timeouts win
+snapper -c "$C" modify --userdata "verify=$t" "$n"
+echo "snapshot $n: verify=$t"
+case $bad$t in 0ok|0refused|0health-timeout|0rules-changed) exit 0;; *) exit 1;; esac

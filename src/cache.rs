@@ -1,14 +1,11 @@
 //! The flat `compiled.tsv` cache format: tab-separated `(prefix, name)`
-//! pairs the LD_PRELOAD shim reads without parsing TOML. Rows are keyed
-//! by each entry in `roots`, never a hardcoded `/`.
-//!
-//! `parse`/`names_for`/`longest_matching_prefix` (the reader half, used
-//! by both this crate and the shim) live in `shim/cache_core.rs` and are
-//! pulled in verbatim below.
+//! pairs, so readers needn't parse TOML. Rows are keyed by each entry in
+//! `roots`, never a hardcoded `/`. The reader half (`parse`/`names_for`/
+//! `longest_matching_prefix`) lives in `cache_core.rs`, pulled in below.
 
 use crate::merge::MergedConfig;
 
-include!("../shim/cache_core.rs");
+include!("cache_core.rs");
 
 /// Renders the merged config into `compiled.tsv` text. Writer-only;
 /// each root's `watches` is already fully resolved, so this just

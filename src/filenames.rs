@@ -1,17 +1,15 @@
-// Every on-disk filename/directory name, in one place. Shim-shared names
-// are pulled in from `shim/filenames_core.rs`; everything below that
-// `include!` is CLI-only.
+// Every on-disk filename/directory name, in one place (the shared core
+// list lives in `filenames_core.rs`, also `include!`d by integration tests).
 //
 // Plain `//` comments, not `//!`: integration tests under `tests/` need
 // to `include!("../src/filenames.rs")` mid-file, which requires this to
 // not be a module-level doc comment.
 
-include!("../shim/filenames_core.rs");
+include!("filenames_core.rs");
 
-/// The compiled LD_PRELOAD shim's on-disk filename — deliberately not a
-/// generic `preload.so`. Defined in `build.rs`, threaded through via
-/// `cargo:rustc-env` so it can't drift from `init.rs`'s copy.
-pub const SHIM_FILE_NAME: &str = env!("GHOSTVOLUMES_SHIM_FILE_NAME");
+/// What versions before the snapshot-prune redesign installed into the
+/// data dir as the LD_PRELOAD shim; `init` removes a leftover copy.
+pub const LEGACY_SHIM_FILE_NAME: &str = "libghostvolumes_shim.so";
 
 /// Config subdirectory (§2). `watched.d` was folded in — a root's watch
 /// list now lives alongside the root itself, see
@@ -39,12 +37,21 @@ pub const DISABLED_ROOTS_LOCK_FILE_NAME: &str = "roots-disable.lock";
 pub const IGNORE_FILE_NAME: &str = ".ghostvolumes-ignore";
 
 /// Guards `reload()`/`scan --save`'s whole read-merge-validate-write
-/// sequence. CLI-only, since the shim never writes `compiled.tsv`/`roots.d`.
+/// sequence.
 #[allow(dead_code)]
 pub const RELOAD_LOCK_FILE_NAME: &str = "reload.lock";
 
 /// Guards `projects register`/`unregister`'s read-modify-write sequence
-/// on the project-roots list (§5) — CLI-only, since the shim never
-/// writes it. Wired in at plan Step 6.
+/// on the project-roots list (§5) against concurrent edits.
 #[allow(dead_code)]
 pub const PROJECT_ROOTS_LOCK_FILE_NAME: &str = "project-roots.lock";
+
+/// Per-VCS settings for `prune`/`vcs-manifest`/`vcs-health`, directly in
+/// the config dir (not a `roots.d` drop-in: those treat unknown tables as
+/// roots).
+pub const VCS_CONFIG_FILE_NAME: &str = "vcs.toml";
+
+/// New `+` rules found by `prune --since`, appended for the user to read
+/// and clear; in the state dir (`~/.local/state/ghostvolumes`), next to
+/// the timer script's lock files.
+pub const EVENTS_LOG_FILE_NAME: &str = "events.log";

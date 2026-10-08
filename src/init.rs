@@ -1,19 +1,10 @@
-//! `ghostvolumes init`: extracts the build-time-compiled shim bytes to
-//! disk, writes default config skeletons. Does no compilation itself —
-//! `rustc` only runs once, in `build.rs`, at `cargo install` time.
+//! `ghostvolumes init`: writes default config skeletons, recompiles an
+//! existing `compiled.tsv` after an upgrade, and removes the LD_PRELOAD
+//! shim a pre-snapshot-prune version left in the data dir.
 
 use std::path::Path;
 
 use crate::filenames;
-
-// Uses `env!(...)` directly, not `filenames::SHIM_FILE_NAME`, since
-// `concat!` only accepts literal tokens, not a `const` reference. Both
-// read the same `build.rs`-defined value, so they can't drift apart.
-const PRELOAD_SO: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/",
-    env!("GHOSTVOLUMES_SHIM_FILE_NAME")
-));
 
 const DEFAULTS_TOML: &str = r#"default-watches = [
     "node_modules",
@@ -36,9 +27,17 @@ default-ignore = [
 
 pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
-    // Rename, never truncate in place: every preloaded process has the
-    // old file mmapped, and rewriting its pages under it means SIGBUS.
-    crate::atomic_write::write_atomically(&data_dir.join(filenames::SHIM_FILE_NAME), PRELOAD_SO)?;
+    // The shim is gone; a copy an older version installed is just litter.
+    // Only a regular file is removed (never through a symlink). Running
+    // processes that still have it mapped are unaffected.
+    let legacy = data_dir.join(filenames::LEGACY_SHIM_FILE_NAME);
+    if legacy.symlink_metadata().is_ok_and(|m| m.is_file()) {
+        std::fs::remove_file(&legacy)?;
+        eprintln!(
+            "removed the retired LD_PRELOAD shim {} (unset LD_PRELOAD in any shell still using it)",
+            legacy.display()
+        );
+    }
 
     std::fs::create_dir_all(config_dir.join(filenames::ROOTS_D_DIR))?;
     let defaults_path = config_dir
@@ -49,45 +48,16 @@ pub fn init(config_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
     }
 
     // An upgrade: recompile `compiled.tsv`/`project-roots.list` in the
-    // form this version's shim expects (e.g. physical paths), so `init`
-    // alone completes it. Never fails `init` — the shim is installed.
+    // form this version expects (e.g. physical paths), so `init` alone
+    // completes it. A reload failure is a warning, never an `init` failure.
     let cache_path = data_dir.join(filenames::COMPILED_CACHE_FILE_NAME);
     if cache_path.exists()
         && let Err(e) = crate::reload::reload(config_dir, &cache_path)
     {
-        eprintln!(
-            "warning: shim installed, but `reload` failed ({e}) - fix it and re-run `ghostvolumes reload`"
-        );
+        eprintln!("warning: `reload` failed ({e}) - fix it and re-run `ghostvolumes reload`");
     }
 
     Ok(())
-}
-
-/// `false` if the installed shim isn't this binary's embedded one —
-/// missing, or left over from before a `cargo install` upgrade (only
-/// `init` copies it to disk), so it may disagree with this CLI's file
-/// formats and lock paths.
-pub fn shim_is_current(data_dir: &Path) -> bool {
-    let path = data_dir.join(filenames::SHIM_FILE_NAME);
-    std::fs::metadata(&path).is_ok_and(|m| m.len() == PRELOAD_SO.len() as u64)
-        && std::fs::read(&path).is_ok_and(|bytes| bytes == PRELOAD_SO)
-}
-
-/// The shim passes every call through unless the data dir belongs to the
-/// process's euid (see `data_dir_owned_by_euid` in `shim/preload.rs`).
-pub fn data_dir_owned_by_euid(data_dir: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(data_dir).is_ok_and(|m| m.uid() == unsafe { libc::geteuid() })
-}
-
-/// One stderr line when `shim_is_current` is false; stdout stays clean
-/// for `shell-init`'s `eval`.
-pub fn warn_if_shim_stale(data_dir: &Path) {
-    if !shim_is_current(data_dir) {
-        eprintln!(
-            "warning: the installed shim is missing or out of date - run `ghostvolumes init`"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -123,53 +93,6 @@ mod tests {
     }
 
     #[test]
-    fn writes_preload_so_bytes() {
-        let dirs = test_dirs();
-
-        init(&dirs.config_dir, &dirs.data_dir).unwrap();
-
-        let written = std::fs::read(dirs.data_dir.join(filenames::SHIM_FILE_NAME)).unwrap();
-        assert_eq!(written, PRELOAD_SO);
-        assert!(!written.is_empty());
-    }
-
-    #[test]
-    fn rerunning_replaces_the_shim_by_rename_not_in_place() {
-        use std::os::unix::fs::MetadataExt;
-        let dirs = test_dirs();
-        let so = dirs.data_dir.join(filenames::SHIM_FILE_NAME);
-        init(&dirs.config_dir, &dirs.data_dir).unwrap();
-        // Holding the old inode open stands in for a process that has it
-        // mmapped: an in-place rewrite would change what it sees.
-        let old = std::fs::File::open(&so).unwrap();
-        let old_ino = old.metadata().unwrap().ino();
-
-        init(&dirs.config_dir, &dirs.data_dir).unwrap();
-
-        assert_ne!(std::fs::metadata(&so).unwrap().ino(), old_ino);
-        assert_eq!(std::fs::read(&so).unwrap(), PRELOAD_SO);
-        assert_eq!(old.metadata().unwrap().len(), PRELOAD_SO.len() as u64);
-    }
-
-    #[test]
-    fn shim_is_current_tracks_the_installed_bytes() {
-        let dirs = test_dirs();
-        assert!(!shim_is_current(&dirs.data_dir), "missing");
-        init(&dirs.config_dir, &dirs.data_dir).unwrap();
-        assert!(shim_is_current(&dirs.data_dir));
-        let so = dirs.data_dir.join(filenames::SHIM_FILE_NAME);
-        let mut stale = PRELOAD_SO.to_vec();
-        stale[0] ^= 1;
-        std::fs::write(&so, stale).unwrap();
-        assert!(
-            !shim_is_current(&dirs.data_dir),
-            "same size, different bytes"
-        );
-        init(&dirs.config_dir, &dirs.data_dir).unwrap();
-        assert!(shim_is_current(&dirs.data_dir));
-    }
-
-    #[test]
     fn rerunning_init_reloads_an_existing_cache_and_tolerates_failure() {
         let dirs = test_dirs();
         let scratch = crate::test_support::btrfs_scratch_dir();
@@ -195,7 +118,6 @@ mod tests {
         // A root that's gone makes `reload` fail; `init` still succeeds.
         std::fs::remove_file(&link).unwrap();
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
-        assert!(shim_is_current(&dirs.data_dir));
     }
 
     #[test]
@@ -276,18 +198,21 @@ mod tests {
 
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
-
-        assert!(dirs.data_dir.join(filenames::SHIM_FILE_NAME).exists());
     }
 
     #[test]
-    fn extracted_preload_so_is_a_valid_shared_object() {
+    fn a_leftover_shim_is_removed_but_never_through_a_symlink() {
         let dirs = test_dirs();
-
+        std::fs::create_dir_all(&dirs.data_dir).unwrap();
+        let legacy = dirs.data_dir.join(filenames::LEGACY_SHIM_FILE_NAME);
+        std::fs::write(&legacy, b"\x7fELF").unwrap();
         init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        assert!(!legacy.exists());
 
-        let bytes = std::fs::read(dirs.data_dir.join(filenames::SHIM_FILE_NAME)).unwrap();
-        // ELF magic number: 0x7f 'E' 'L' 'F'
-        assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+        let target = dirs.data_dir.join("elsewhere");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &legacy).unwrap();
+        init(&dirs.config_dir, &dirs.data_dir).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 }

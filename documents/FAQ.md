@@ -2,39 +2,29 @@
 
 ## What's the recommended workflow?
 
-**Starting a brand new project, nothing built yet:**
+1. Set up the projects subvolume, the Snapper config and the timer once: [snapshot-prune.md](snapshot-prune.md#setup).
+2. For each project, record what's volatile:
 
 ```bash
-cd ~/projects/my-app
-npm install                    # node_modules is created as a plain directory
-ghostvolumes convert .         # finds it, asks whether to remember the decision
+ghostvolumes discover ~/src/my-app                   # suggestions, read-only
+ghostvolumes decide ~/src/my-app --add node_modules  # or plain `decide` to be asked
 ```
 
-Answering yes writes a `+`/`-` line to `.ghostvolumes-decisions` at the project root. Commit it, the same way you'd commit `.gitignore`:
+3. Commit `.ghostvolumes-decisions` like `.gitignore`:
 
 ```bash
-git add .ghostvolumes-decisions && git commit -m "Record subvolume decisions"
+git add .ghostvolumes-decisions && git commit -m "Record volatile directories"
 ```
 
-From the next build onward, wrap it with `intercept` and matching directories convert automatically, no prompting:
+From the next hourly run on, every snapshot of `~/src` leaves those directories out.
 
-```bash
-rm -rf node_modules && ghostvolumes intercept -- npm install
-```
+**Cloning a repo that already has decisions committed:** nothing to do; its committed `+` lines apply from the next run (reported once in `events.log` as new), but in git repos only to directories the repo also ignores.
 
-**Cloning a repo that already has decisions committed:** nothing to do — `ghostvolumes intercept -- <your build command>` works from the very first build.
+**Pre-authoring decisions:** hand-write `.ghostvolumes-decisions` (see [decision-files.md](decision-files.md)); the next snapshot uses them.
 
-**Pre-authoring decisions before ever building:** hand-write `.ghostvolumes-decisions` yourself (see [decision-files.md](decision-files.md) for the pattern syntax) — `intercept` benefits immediately, same as the cloned-repo case.
+## How do I see what a snapshot run did?
 
-## What happens if `intercept` finds something undecided?
-
-It prints a notice after your command finishes, naming the one covering command to run:
-
-```
-ghostvolumes: new undecided path(s) found under /home/user1/projects/my-app — run `ghostvolumes convert /home/user1/projects/my-app` to review them
-```
-
-Running that `convert` resolves everything pending under that root in one pass, including anything nested (e.g. a `packages/foo/node_modules` inside a monorepo).
+`snapper -c src list` shows `verify=…` per snapshot (see the table in [snapshot-prune.md](snapshot-prune.md#what-each-run-does)), and `journalctl --user -u ghostvolumes-snapshot@src` shows every pruned and refused path. To preview without changing anything: `ghostvolumes prune --dry-run ~/src/.snapshots/N/snapshot`; add `--config src --since 7d` to see what decision changes within a week newly prune.
 
 ## How do I make sure a directory is never converted?
 
@@ -46,7 +36,7 @@ Write a `- name` (or `- /exact/path`) line to the decision file yourself, or ans
 
 ## What happens if `convert` finds an existing subvolume with no decision?
 
-It still asks, but defaults to **yes** on an empty answer rather than declining, unlike every other prompt in the tool — there's nothing left to convert, only a decision to record, and a hand-made subvolume is overwhelmingly likely to have been made on purpose. Run non-interactively (no TTY), it converts nothing and leaves a pending `?` marker instead, same as `intercept`.
+It still asks, but defaults to **yes** on an empty answer rather than declining, unlike every other prompt in the tool — there's nothing left to convert, only a decision to record, and a hand-made subvolume is overwhelmingly likely to have been made on purpose. Run non-interactively (no TTY), it converts nothing and leaves a pending `?` marker instead.
 
 ## What does `convert --dry-run` actually print?
 
@@ -69,18 +59,6 @@ Set `GHOSTVOLUMES_DEBUG=debug` (with or without `--dry-run`) to see *why* each c
 
 A pattern that exactly matches an existing pending `?` marker (from `--add`/`--deny`, or from asking about it in steps 2/3) toggles that line in place instead of adding a second one. There's no `--create` — naming something explicitly to materialize conflicts with `decide`'s whole contract of never touching the filesystem.
 
-## Why not just export `LD_PRELOAD` globally?
+## What happened to `intercept` and the `LD_PRELOAD` shim?
 
-`ghostvolumes shell-init <shell>` still prints a valid `export LD_PRELOAD=...` line, but it's a diagnostic/reference tool, not something to `eval` into your rc file. Sourcing it there means every process your shell spawns inherits `LD_PRELOAD` — including every `ghostvolumes` subcommand itself (`intercept`, `convert`, `projects`, ...), not just the build you meant to wrap. That breaks `intercept`'s own invariant that the shim only ever loads into the child, never the parent, and makes `intercept` mostly redundant besides its post-run notice. See [design.md](design.md#key-decisions-and-why) for the full mechanism.
-
-If you want whole-session coverage instead of wrapping each command individually, open a deliberate wrapped subshell:
-
-```bash
-ghostvolumes intercept -- bash   # or zsh
-```
-
-Everything inside that subshell is the "child," so the invariant holds and your outer login shell stays unaffected.
-
-## Can I run `ghostvolumes` management commands from inside `intercept -- bash`?
-
-No — `ghostvolumes` refuses to run at all if its own shim is already present in `LD_PRELOAD`, which is always true inside an `intercept -- bash` session. There's no legitimate workflow that needs this: `convert` is only ever meant to run before a project is wrapped, and `intercept`'s "undecided path" notice only prints after the wrapped session exits, by which point you're already back outside it. See [design.md](design.md#key-decisions-and-why) for why this has no carve-out.
+They were retired (2026-10) in favour of pruning snapshots. Injecting a library into every build process missed static binaries, IDEs and anything started outside `intercept`, and carried most of the maintenance and security cost. Pruning inside Snapper snapshots needs nothing in your processes and covers every tool. `ghostvolumes init` removes the old shim file. Unset any `LD_PRELOAD` you exported from `shell-init`. The design history is in [design.md](design.md).

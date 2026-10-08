@@ -1,5 +1,4 @@
 // Decision-file parsing and matching (replaces the git-tracked gate).
-// Shared between the CLI (via `include!`) and the shim (via `mod`).
 // One decision file per directory, gitignore-style: `+ <pattern>`
 // (convert), `- <pattern>` (never), `? <pattern>` (pending marker,
 // toggled in place later), `#` comment, or blank. Three pattern forms:
@@ -8,8 +7,7 @@
 // `//!`/`///`) since this file is spliced mid-file via `include!`.
 
 // Fully-qualified paths throughout (not `use` at file scope): this file
-// is included both mid-file into src/decision.rs and as its own module
-// in the shim, so qualifying every path keeps both scopes unambiguous.
+// is spliced mid-file into src/decision.rs.
 
 /// One parsed, non-comment, non-blank line: `+`/`-` polarity and the
 /// raw pattern text (not yet matched against anything).
@@ -23,7 +21,7 @@ struct DecisionLine {
 /// blank lines, `#` comments, invalid patterns (see `valid_pattern`),
 /// and anything not exactly `+`/`-`-prefixed — `?` pending-marker lines
 /// fall into that catch-all too. Never panics on arbitrary text (a BOM
-/// or non-ASCII first char used to, aborting the shim's host process).
+/// or non-ASCII first char used to).
 fn parse_lines(text: &str) -> alloc_free_vec::Vec<DecisionLine> {
     let mut lines = alloc_free_vec::Vec::new();
     for line in text.lines() {
@@ -220,8 +218,7 @@ fn pattern_matches(file_dir: &std::path::Path, pattern: &str, candidate: &std::p
 
 /// Parses a `.ghostvolumes-ignore` file into a flat list of patterns to
 /// never walk into — same three pattern forms as a decision file, but no
-/// `+`/`-`/`?` prefix. Dead code from the shim's perspective; only
-/// `convert`/`discover` (CLI-side) call this.
+/// `+`/`-`/`?` prefix.
 #[allow(dead_code)]
 pub fn parse_ignore_patterns(text: &str) -> std::vec::Vec<String> {
     text.lines()
@@ -233,8 +230,7 @@ pub fn parse_ignore_patterns(text: &str) -> std::vec::Vec<String> {
 
 /// `true` if `candidate` matches any of `patterns`, resolved relative to
 /// `anchor_dir` — used to skip descending into `candidate` entirely,
-/// not to decide whether to convert it. Dead code from the shim's
-/// perspective, see `parse_ignore_patterns` above.
+/// not to decide whether to convert it.
 #[allow(dead_code)]
 pub fn ignore_matches(
     patterns: &[String],
@@ -321,8 +317,7 @@ pub fn needs_pending_marker(text: &str, pattern: &str) -> bool {
 /// Every anchored, wildcard-free `+`/`?` line's own pattern — surfaces
 /// a candidate a filesystem walk could never discover on its own (not
 /// yet on disk, or not matching a watched name). `-` and
-/// wildcarded/unanchored patterns are excluded. Dead code from the
-/// shim's perspective — it only appends markers, never resolves them.
+/// wildcarded/unanchored patterns are excluded.
 #[allow(dead_code)]
 pub fn parse_anchored_exact_patterns(text: &str) -> std::vec::Vec<String> {
     text.lines()

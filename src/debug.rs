@@ -1,11 +1,10 @@
-//! CLI-side trace logging. `Verbosity`/parsing is shared with the shim
-//! via `shim/debug_core.rs` (pulled in verbatim below).
+//! Trace logging. `Verbosity`/parsing lives in `debug_core.rs` (pulled
+//! in verbatim below).
 //!
-//! Adds the one thing that isn't shared: where a trace line goes. Unlike
-//! the shim (which must never touch stdout/stderr), CLI commands write
-//! to stderr by default, or to `GHOSTVOLUMES_LOG_FILE` if set.
+//! Adds where a trace line goes: stderr by default, or
+//! `GHOSTVOLUMES_LOG_FILE` if set.
 
-include!("../shim/debug_core.rs");
+include!("debug_core.rs");
 
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};

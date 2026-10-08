@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%2F%20BTRFS-informational)
 
-Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, ...) into unsnapshotted BTRFS subvolumes, so your snapshot tool (Snapper, Timeshift, btrbk...) skips them instead of wasting space and time on things you'll regenerate anyway.
+Long Snapper history of your projects **without the build noise**. Volatile, regenerable directories (`node_modules`, `target`, `.venv`, `build`, …) stay where your tools put them. GhostVolumes removes them from your **snapshots**, not from your working tree, so long retention costs only real source changes.
 
 **Requires Linux with BTRFS.** GhostVolumes exits cleanly with a clear message on any other platform.
 
@@ -12,10 +12,9 @@ Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, .
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 **Table of Contents**
 
-- [Features](#features)
+- [How it works](#how-it-works)
 - [Install](#install)
 - [Shell completions](#shell-completions)
-- [How it works](#how-it-works)
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [Debugging](#debugging)
@@ -25,27 +24,46 @@ Isolates volatile build artifacts (`node_modules`, `target`, `.venv`, `build`, .
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
-## Features
+## How it works
 
-- **Zero sudo at runtime** — subvolume creation only needs standard filesystem permissions.
-- **Near-zero overhead** — an `LD_PRELOAD` hook intercepts `mkdir`/`mkdirat` directly, no polling or file-watching.
-- **Explicit, reviewable decisions** — every conversion is backed by a committed `+`/`-` record, never a silent guess.
-- **VCS-agnostic** — works the same whether or not a project uses git.
-- **Built for your machine** — the shim is compiled locally by `cargo install`, so it always matches your host's libc.
+Every hour Snapper takes a **writable** snapshot of your projects subvolume (`~/src`). `ghostvolumes prune` deletes the directories you've decided are volatile **inside that snapshot**, and the snapshot is locked read-only. Snapper's timeline cleanup then keeps it as long as you like. Your working tree, build tools and IDEs are never touched, and nothing is injected into any process.
+
+- **Explicit, reviewable decisions.** A `+`/`-` line in a project's `.ghostvolumes-decisions` says what's volatile. Undecided means kept. Decisions are committable and work with any VCS (or none).
+- **Safe by construction.** It never prunes outside the snapshot, through a symlink, VCS metadata, tracked files, or (in git repos) anything the repo doesn't ignore.
+- **Proven per snapshot.** VCS metadata gets a byte-identical manifest before and after pruning. Each changed repo gets a health check (git: `fsck --connectivity-only`), which only runs when Snapper's own comparison says that repo changed.
+- **Transparent automation.** A ~65-line shell script plus a systemd user timer. Results are tagged on each snapshot (`verify=ok|refused|rules-changed|…`), alerts go to the journal, and decision changes are logged for you to read. No snapshot is ever deleted by the tool.
+
+Setup and day-to-day use: **[snapshot-prune.md](documents/snapshot-prune.md)**.
+
+```
+$ ghostvolumes discover ~/src                                   # what looks volatile? (read-only)
+$ ghostvolumes decide ~/src/app --add node_modules --add /target  # record decisions (that's all prune needs)
+$ systemctl --user enable --now ghostvolumes-snapshot@src.timer  # hourly pruned snapshots
+```
+
+- **[`discover [path]`](documents/discover.md)** — a read-only survey suggesting decisions. It includes tool-tagged caches (`CACHEDIR.TAG`).
+- **[`decide <path>`](documents/decide.md)** — walks a project and records `+`/`-` decisions (asks on a TTY), or hand-authors them with `--add`/`--deny`.
+- **`prune`, `vcs-manifest`, `vcs-health`** — the building blocks the snapshot script calls; see [snapshot-prune.md](documents/snapshot-prune.md).
+- **[`convert <path>`](documents/convert.md)** *(optional)* — also turns decided directories in the **live** tree into nested BTRFS subvolumes, for snapshot setups that should skip them entirely.
+
+Shared reference:
+- [decision-files.md](documents/decision-files.md): the `.ghostvolumes-decisions` syntax.
+- [project-roots.md](documents/project-roots.md): registered projects (for `convert`/`decide`).
+- [files.md](documents/files.md): every file GhostVolumes reads or writes.
+- [security.md](documents/security.md): the threat model and its defenses.
+- [design.md](documents/design.md): design history, including the retired `LD_PRELOAD` shim.
+- [FAQ.md](documents/FAQ.md): common questions.
 
 ## Install
 
 ```bash
 cargo install --locked --git https://github.com/braindevices/ghostvolumes --tag vX.Y.Z
-ghostvolumes init                # install the LD_PRELOAD shim, write default config
-ghostvolumes roots scan --save   # detect your snapshot-managed BTRFS roots
+ghostvolumes init                # write default config
 ```
 
-That's the whole setup. **Don't** add `eval "$(ghostvolumes shell-init bash)"` (or `zsh`) to your shell rc file — see the [FAQ](documents/FAQ.md#why-not-just-export-ld_preload-globally) for why. Nothing converts automatically after this step; see the [FAQ](documents/FAQ.md) for the recommended workflow.
+Then follow [snapshot-prune.md](documents/snapshot-prune.md#setup): the projects subvolume, the Snapper config (Snapper ≥ 0.12), and the timer (`ghostvolumes contrib` prints the bundled script and units).
 
-Pick `vX.Y.Z` from [Releases](https://github.com/braindevices/ghostvolumes/releases); drop `--tag` to build the tip of `main` instead. `--locked` builds with the committed `Cargo.lock` rather than re-resolving dependencies. Either way, `cargo install --git` clones the whole repository, including this project's own `ai-work/` planning notes.
-
-Prefer not to have those included? Download a release's source archive instead (`ai-work/` is excluded there — see its `.gitattributes`) and install from the extracted directory:
+Pick `vX.Y.Z` from [Releases](https://github.com/braindevices/ghostvolumes/releases), or drop `--tag` to build the tip of `main`. `--locked` builds with the committed `Cargo.lock`. `cargo install --git` clones the whole repository, including this project's `ai-work/` planning notes. To avoid that, install from a release's source archive, which excludes `ai-work/` (see `.gitattributes`):
 
 ```bash
 curl -L -o ghostvolumes.tar.gz https://github.com/braindevices/ghostvolumes/archive/refs/tags/vX.Y.Z.tar.gz
@@ -55,123 +73,66 @@ cargo install --locked --path ghostvolumes-X.Y.Z
 
 ## Shell completions
 
-Dynamic — subcommands/flags plus live data (registered projects, pending `?` patterns for `decide --add`/`--deny`), not a static snapshot:
+Dynamic: subcommands and flags, plus live data (registered projects, pending `?` patterns for `decide --add`/`--deny`):
 
 ```bash
 echo 'source <(COMPLETE=bash ghostvolumes)' >> ~/.bashrc   # or ~/.zshrc with COMPLETE=zsh
 ```
 
-Re-sourced fresh on every shell startup rather than saved to a file, matching `clap_complete`'s own recommendation — the shell/binary handshake is unstable across versions.
-
-## How it works
-
-A directory gets a `+`/`-` decision recorded once; every future build reuses it automatically, no prompt, no guessing:
-
-```
-$ npm install                              # node_modules created as a plain directory
-$ ghostvolumes convert .                   # asks once, records a decision
-$ ghostvolumes intercept -- npm install    # from now on: automatic, no prompt
-```
-
-- **[`intercept -- <cmd>`](documents/intercept.md)** — runs `<cmd>` with the shim active, converting anything already decided `+`. Never prompts.
-- **[`convert <path>`](documents/convert.md)** — registers `<path>` as a project, then walks it asking about each undecided candidate.
-- **[`decide <path>`](documents/decide.md)** — the same walk as `convert`, but only ever records decisions, never touches the filesystem.
-- **[`discover [path]`](documents/discover.md)** — a read-only survey of an arbitrary path, suggesting `decide`/`convert` commands to run rather than acting itself.
-
-Shared reference: [decision-files.md](documents/decision-files.md) (the `.ghostvolumes-decisions` syntax), [project-roots.md](documents/project-roots.md) (why projects can't nest), and [files.md](documents/files.md) (every file GhostVolumes reads or writes, annotated). [design.md](documents/design.md) has the full rationale, [security.md](documents/security.md) the threat model and its defenses, and [FAQ.md](documents/FAQ.md) has common workflow questions.
-
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `ghostvolumes roots scan [--save]` | Detect BTRFS snapshot-managed roots |
-| `ghostvolumes roots list` | List every configured root and its effective watch list |
-| `ghostvolumes roots disable <path>` | Disable a configured root — writes `roots.d/10-disable.toml`, never touches `00-auto.toml` |
-| `ghostvolumes roots enable <path>` | Re-enable a root previously disabled via `roots disable` |
-| `ghostvolumes reload` | Rebuild the runtime cache after hand-editing `roots.d` |
-| `ghostvolumes discover [PATH] [flags]` | Survey for undecided directories and drift, suggesting `decide`/`convert` commands to run — see [discover.md](documents/discover.md) |
-| `ghostvolumes convert <path> [--max-depth N] [--create <relative-path>]... [--dry-run]` | Register `<path>` as a project (asks if not already), then recursively resolve subvolume candidates under it — see [convert.md](documents/convert.md) |
-| `ghostvolumes decide <path> [--max-depth N] [--add <pattern>]... [--deny <pattern>]...` | Walk and resolve decisions like `convert`, but never convert anything; also hand-authors `+`/`-` decisions directly — see [decide.md](documents/decide.md) |
-| `ghostvolumes projects list` | List registered project roots, flagging any that no longer exist |
-| `ghostvolumes projects register <path>` | Register a project root (usually automatic via `convert`) — see [project-roots.md](documents/project-roots.md) |
-| `ghostvolumes projects unregister [path]` | Remove a project root; with no path, scan and interactively prune stale ones |
-| `ghostvolumes intercept -- <cmd>` | Run `<cmd>` with the shim active, converting anything with a recorded `+` decision — see [intercept.md](documents/intercept.md) |
-| `ghostvolumes init` | Install the shim and default config (idempotent, safe to re-run) |
-| `ghostvolumes shell-init <bash\|zsh>` | Print the `LD_PRELOAD` value `intercept` uses (diagnostic only) |
+| `ghostvolumes discover [PATH] [flags]` | Survey for undecided directories, tool-tagged caches and drift; suggests commands — see [discover.md](documents/discover.md) |
+| `ghostvolumes decide <path> [--max-depth N] [--add <pattern>]... [--deny <pattern>]...` | Record `+`/`-` decisions (walk and ask, or hand-author) — see [decide.md](documents/decide.md) |
+| `ghostvolumes projects list` / `register <path>` / `unregister [path]` | Manage registered projects — see [project-roots.md](documents/project-roots.md) |
+| `ghostvolumes prune [--dry-run] [--config <c> --since <1d\|time>] <snapshot>` | Delete the decided directories inside a writable Snapper snapshot (exit 0 clean, 1 something refused, 2 error, 3 already read-only, 4 decision changes within the window prune something new, logged to `events.log` first) |
+| `ghostvolumes vcs-manifest <path>` | Print a manifest of every VCS metadata dir (for before/after comparison) |
+| `ghostvolumes vcs-health <snapshot> [--changes FILE]` | Run each repo's health command in a snapshot; with `--changes` (from `snapper status`), only changed repos |
+| `ghostvolumes contrib [name]` | Print a bundled helper: the snapshot script, systemd units, login check |
+| `ghostvolumes convert <path> [--max-depth N] [--create <relative-path>]... [--dry-run] [--delete-backup]` | *Optional:* make decided directories in the live tree nested subvolumes — see [convert.md](documents/convert.md) |
+| `ghostvolumes roots scan [--save]` / `list` / `disable <path>` / `enable <path>` | Snapshot-managed roots and their watched names (used by `discover`/`decide`/`convert`) |
+| `ghostvolumes reload` | Recompile the roots cache after hand-editing `roots.d` |
+| `ghostvolumes init` | Write default config; after an upgrade, recompile caches and remove the retired shim |
 
 ## Configuration
 
-Global config lives under `~/.config/ghostvolumes/roots.d/` — see [files.md](documents/files.md) for every file GhostVolumes reads or writes, config and data alike:
-
-```
-roots.d/00-auto.toml     # written by `roots scan --save` — regenerated, don't hand-edit
-roots.d/00-defaults.toml # ships with the package — written once by `init` if missing
-roots.d/10-local.toml    # hand-edited: extra roots, per-root overrides, disabling a root
-```
-
-Every `*.toml` file in `roots.d/` is merged in sorted-filename order,
-**last file wins per field** (no unions) — a root path gets its own
-table, with an optional `enabled` (default `true`) and `watches`
-(replaces, not adds to, `default-watches` for that root):
+- `~/.config/ghostvolumes/vcs.toml`: per-VCS metadata dirs and the guard, allow and health commands. Defaults cover git, hg, svn, jj and dvc; see [snapshot-prune.md](documents/snapshot-prune.md#per-vcs-settings-configghostvolumesvcstoml).
+- `~/.config/ghostvolumes/roots.d/*.toml`: snapshot-managed roots and the names `discover`/`decide` suggest. Merged in sorted-filename order, **last file wins per field**:
 
 ```toml
 default-watches = ["node_modules", "target", ".venv", "build"]
 default-ignore = [".git", ".hg", ".svn", ".snapshots"]
+delete-convert-backup = false       # convert only
 
 ["/home/user/some-project"]
-watches = ["node_modules", "dist"]   # this root only watches these two
+watches = ["node_modules", "dist"]  # this root only watches these two
 
 ["/mnt/noisy-backup-drive"]
-enabled = false                      # roots scan --save keeps finding this root; suppress it
+enabled = false
 ```
 
-A disabled root doesn't cascade to any other root nested under its
-path — each root path is its own independent entry.
-
-`default-ignore` is global-only — unlike `watches`, there's no
-per-root `["/path"] ignore = [...]` override. Per-root/per-project
-ignore patterns instead live in their own `.ghostvolumes-ignore` file,
-decentralized rather than merged through `roots.d` — see
-[convert.md](documents/convert.md#ignoring-directories-entirely).
+- `.ghostvolumes-ignore`: per-project directories `convert`/`decide` never walk into (`prune` doesn't read it: everything in the managed subvolume is pruned by decisions alone). See [files.md](documents/files.md) for every file.
 
 ## Debugging
 
-The shim always logs critical events (a subvolume created, an undecided candidate skipped, an unexpected error) to `~/.local/share/ghostvolumes/shim.log`. It never writes to stdout/stderr, since it runs inside arbitrary host processes. `convert`/`decide` share the same verbosity levels and write to stderr by default, or to `GHOSTVOLUMES_LOG_FILE` if set.
-
-`GHOSTVOLUMES_DEBUG` takes one of five levels (case-insensitive; unset, empty, or unrecognized all mean `info`):
-
-| Level | |
-|---|---|
-| `error` | Quietest |
-| `warn` | |
-| `info` | Default — critical events only |
-| `debug` | Every decision and why |
-| `trace` | Most verbose |
-
-Each logged line is prefixed with a timestamp, pid, and level: `[<ISO-8601-UTC>] [pid <pid>] [<LEVEL>] <message>` (e.g. `[2026-07-16T18:50:01.461Z] [pid 369670] [DEBUG] ...`).
-
-```bash
-GHOSTVOLUMES_DEBUG=debug ghostvolumes intercept -- npm install   # log every decision and why
-GHOSTVOLUMES_LOG_FILE=/path/to/log ghostvolumes intercept -- npm install   # redirect the log
-GHOSTVOLUMES_AUTO_YES=1 ghostvolumes intercept -- npm install              # skip the decision lookup (not recommended)
-```
+`GHOSTVOLUMES_DEBUG` sets the verbosity of `convert`/`decide` (`error`, `warn`, `info` (default), `debug`, `trace`). Output goes to stderr, or to `GHOSTVOLUMES_LOG_FILE` if set. The snapshot timer logs to the journal: `journalctl --user -u ghostvolumes-snapshot@src`. Each snapshot's result is in `snapper -c src list` (`verify=…`).
 
 ## Upgrading
 
 ```bash
 cargo install --locked --git https://github.com/braindevices/ghostvolumes --tag vX.Y.Z --force
-ghostvolumes init   # re-installs the shim to match the new build
+ghostvolumes init
 ```
 
-`cargo install` only replaces the binary; the shim `LD_PRELOAD` loads is only updated by `init`, so `intercept` refuses to run until you do. `init` alone completes the upgrade: it swaps the shim atomically (running sessions keep the old one until restarted) and re-runs `reload` so existing config is recompiled for the new version.
+`init` recompiles existing caches for the new version and removes the `LD_PRELOAD` shim older versions installed. Also stop using `ghostvolumes intercept` and any `shell-init` export: both are gone. Then re-print the snapshot script with `ghostvolumes contrib ghostvolumes-snapshot` if it changed.
 
 ## Known limitations
 
-- **Statically-linked binaries** bypass the shim entirely — their syscalls skip libc.
-- **A brand-new project with no decisions recorded** gets no benefit from `intercept` on its first build. Run `ghostvolumes convert <project-root>` once to seed decisions.
-- **No prebuilt binaries** — the shim must compile against the host's own libc, so installs always build from source.
-
-See [design.md](documents/design.md) for the reasoning behind these tradeoffs, and [FAQ.md](documents/FAQ.md) for common workflow questions.
+- **The whole subvolume is managed:** every decision file in it applies to everything below it; there's no way to exclude a directory from pruning except a `-` decision or moving it out of the subvolume.
+- **Unsupported repos** (skipped with a message): git alternates (`clone --shared`/`--reference`), linked worktrees, and VCS dirs that are symlinks.
+- **Snapper ≥ 0.12** is required, and Snapper itself needs root (`snapperd`) for snapshots.
+- **No prebuilt binaries;** installs build from source.
 
 ## License
 

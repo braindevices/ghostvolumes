@@ -1,6 +1,5 @@
 // Advisory cross-process file locking (§2). `std::fs::File::lock()`/
-// `try_lock()`/`unlock()` are stable as of Rust 1.89, pure `std`, so
-// usable directly from the dependency-free shim. Dropping the `File`
+// `try_lock()`/`unlock()` are stable as of Rust 1.89, pure `std`. Dropping the `File`
 // releases the lock automatically. Plain `//` comments (not `//!`/
 // `///`) since this file is spliced mid-file into src/lock.rs.
 
@@ -22,7 +21,7 @@ pub fn open_lock_file(path: &std::path::Path) -> std::io::Result<std::fs::File> 
 /// Percent-encodes `/` and `%` so a boundary's absolute path becomes a
 /// single flat filename (e.g. `/home/user1/app` ->
 /// `%2Fhome%2Fuser1%2Fapp.lock`) — deliberately not a hash, keeping it
-/// human-legible and collision-free across shim/CLI.
+/// human-legible and collision-free.
 #[allow(dead_code)]
 pub fn boundary_lock_path(
     locks_dir: &std::path::Path,
