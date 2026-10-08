@@ -12,6 +12,7 @@ Notable changes to this project, loosely following [Keep a Changelog](https://ke
 - **Breaking:** `prune` no longer reads `.ghostvolumes-ignore` (`convert`/`decide` still do) or `project-roots.list`: the whole managed subvolume is pruned by its decision files alone, each applying to everything below it (a `~/src/.ghostvolumes-decisions` reaches every repo). Use a `-` decision to keep a path. **After upgrading, read `events.log`:** the first run lists everything now pruned, including directories with decision files that were never registered and parent rules reaching child repos.
 - **Changed** `prune` only accepts a real snapshot (`<subvolume>/.snapshots/<n>/snapshot`, a subvolume root; `--subvolume` is gone) and refuses a run with a real subvolume or another filesystem inside it.
 - **Added** `discover` suggestions for `CACHEDIR.TAG` dirs.
+- **Changed** building on anything but Linux now fails at compile time with "GhostVolumes only supports Linux with BTRFS." (previously a stub binary printed that and exited 1).
 - **Removed** `intercept`, `shell-init`, the build-time shim compile and the shim install; `init` deletes a leftover `libghostvolumes_shim.so`.
 - **Changed** `convert` keeps a reflinked, git-ignored backup by default (`--delete-backup` / `delete-convert-backup = true` to delete); `rust-version` is 1.95; many audit fixes (path escapes, symlinked decision files, parser panics, line-format injection) — see `ai-work/audit-2026-10-06.md` and `documents/security.md`.
 

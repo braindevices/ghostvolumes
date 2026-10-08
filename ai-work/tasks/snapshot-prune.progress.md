@@ -312,3 +312,40 @@ Both reviewers found nothing Critical or High and agreed on one fix list after a
 - Under real snapper, the non-snapshot baseline test sees snapper itself drop the writable plain dir (so no baseline, and the full list is logged), rather than prune rejecting it. Both outcomes are fail-safe, and the test accepts either.
 ### Issues found / fixed
 - **Earlier "scratch dir empty" claims (Steps 11b–11d) were made with `ls` without `-A`, which hides the `.tmp*` dirs.** The default (fake) suite really did leave nothing; the real-snapper runs had left read-only snapshots. 34 leftovers were cleaned, and the root cause (real `snapper delete` needs SNAP_DESTROY, EPERM here) is fixed by item 5.
+
+## Step 11f — fix the platform-gating CI job (macOS/Windows build)
+**Status**: done
+**Date**: 2026-10-08
+### What was done
+- `absolutize` in `src/main.rs` was not `#[cfg(target_os = "linux")]`, but its `PathBuf` import is, so the non-Linux fallback binary didn't compile (E0425). Gated it like its callers.
+- Verified with `cargo check`/`clippy --target x86_64-pc-windows-gnu` and `x86_64-apple-darwin` (std targets added via rustup); Linux: fmt, clippy clean, 397 tests pass.
+### Deviations from plan
+None (not a planned step; a CI failure the owner reported).
+### Issues found / fixed
+- The break dates from audit-fixes Step 4 (b1e66e7), not from this branch's own steps.
+- It went unnoticed locally because the documented wasm32 cross-check no longer gets that far: `wait-timeout` (added in Step 5) doesn't compile for wasm32. The windows-gnu/darwin `cargo check` is the reliable local check now.
+- Owner follow-up ("gate the Linux-only dependencies"): all runtime `[dependencies]` moved to `[target.'cfg(target_os = "linux")'.dependencies]`, since the non-Linux fallback `main` only calls `eprintln!`. `Cargo.lock` unchanged; `cargo clippy --locked` is clean for wasm32-unknown-unknown, x86_64-pc-windows-gnu and x86_64-apple-darwin, so the wasm32 check works again. Linux: fmt, clippy clean, 397 tests pass.
+
+## Step 11g — refuse to build off Linux (`compile_error!`)
+**Status**: done
+**Date**: 2026-10-08
+### What was done
+- Owner ruling: building anywhere but Linux makes no sense (no BTRFS). `src/main.rs` now starts with `#[cfg(not(target_os = "linux"))] compile_error!("GhostVolumes only supports Linux with BTRFS.");`; the 35 per-item `#[cfg(target_os = "linux")]`, the stub `main` and the Linux-only dependency table (Step 11f) are gone; `#[cfg(all(target_os = "linux", test))]` → `#[cfg(test)]`.
+- The `platform-gating` CI job (macOS/Windows runners) is deleted. design.md (non-goals) and CHANGELOG updated; supersedes main plan §8.3's stub binary.
+- `absolutize_tests` moved to the end of main.rs (clippy `items_after_test_module`, previously hidden by the cfg).
+### Deviations from plan
+None.
+### Issues found / fixed
+- Checked: macOS (`cargo build --target x86_64-apple-darwin`) prints the message first, then one more error (`libc::BTRFS_SUPER_MAGIC`); Windows (`cargo check`) prints it first, then ~30 more (`std::os::unix`). wasm32 now stops earlier, in `wait-timeout`, before our crate; wasm32 isn't a target anyone installs on. Linux: fmt, clippy clean, 397 tests pass.
+
+## Step 11h — CI snapper e2e: clean environment for the `dev` user
+**Status**: done
+**Date**: 2026-10-08
+### What was done
+- First CI run of `snapshot-prune-e2e` (snapper 0.13.2 from OBS installed and the key pin passed) failed: `Error: /home/runner/.config/ghostvolumes/vcs.toml: Permission denied`, git warnings about `/home/runner/.config/git/*`, snapshot 1 `verify=failed`. `sudo -u dev -H` kept the runner's `XDG_CONFIG_HOME`; `-H` resets only `HOME`.
+- `scripts/ci-snapper-e2e.sh` now runs the `dev` shell under `env -i` with only HOME/USER/LOGNAME/LANG/PATH.
+- Verified locally by simulating the leak (`XDG_CONFIG_HOME=/home/runner/.config sudo -u nobody env -i …`): it's unset inside; `bash -n` ok. Needs the next CI run to confirm.
+### Deviations from plan
+None.
+### Issues found / fixed
+- The pipeline behaved fail-safe: unreadable config → exit 2 → snapshot locked and tagged `failed`, the before-manifest failure was reported and pruning was not attempted silently.

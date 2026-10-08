@@ -34,7 +34,11 @@ sudo snapper -c src set-config TIMELINE_CREATE=no ALLOW_USERS=dev SYNC_ACL=yes N
 sudo install -m755 target/release/ghostvolumes /usr/local/bin/ghostvolumes
 sudo install -m755 contrib/ghostvolumes-snapshot /usr/local/bin/ghostvolumes-snapshot
 
-sudo -u dev -H bash -euo pipefail -c '
+# A clean environment: sudo keeps the runner's XDG_CONFIG_HOME (and more),
+# which would point git and ghostvolumes at /home/runner/.config.
+sudo -u dev env -i HOME=/home/dev USER=dev LOGNAME=dev LANG=C.UTF-8 \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  bash -euo pipefail -c '
   cd ~/src && mkdir p && cd p
   git init -q -b main && git config user.name t && git config user.email t@t
   printf "target/\n" > .gitignore

@@ -49,9 +49,11 @@ for why, and what replaced it.
 
 ## Non-goals (explicit, not just unfinished)
 
-- **Non-Linux, non-BTRFS platforms.** Gated with a clear "only supports
-  Linux with BTRFS" message and clean exit (§8.3) — not a compile
-  failure, not a silent no-op, but also never going to be supported.
+- **Non-Linux, non-BTRFS platforms.** Building elsewhere stops with a
+  `compile_error!` saying "only supports Linux with BTRFS", so
+  `cargo install` fails with that message instead of installing a binary
+  that can't do anything. (Until 2026-10 it built a stub that printed the
+  message and exited 1; §8.3.) Never going to be supported.
 - **Timeshift/btrbk detection.** `scan`'s privileged pass (§3 point 2)
   was designed but never implemented — only Snapper's unprivileged
   `.snapshots`-is-a-subvolume fingerprint exists today.

@@ -1,61 +1,37 @@
-// BTRFS ioctls, LD_PRELOAD, and /proc/self/mountinfo are Linux-specific;
-// gate the whole implementation rather than fail to compile confusingly
-// elsewhere.
-#[cfg(target_os = "linux")]
+// BTRFS ioctls and /proc/self/mountinfo are Linux-only, and so is BTRFS:
+// say so at install time rather than build a binary that can't do anything.
+#[cfg(not(target_os = "linux"))]
+compile_error!("GhostVolumes only supports Linux with BTRFS.");
+
 mod atomic_write;
-#[cfg(target_os = "linux")]
 mod btrfs;
-#[cfg(target_os = "linux")]
 mod cache;
-#[cfg(target_os = "linux")]
 mod completions;
-#[cfg(target_os = "linux")]
 mod config;
-#[cfg(target_os = "linux")]
 mod convert;
-#[cfg(target_os = "linux")]
 mod debug;
-#[cfg(target_os = "linux")]
 mod decision;
-#[cfg(target_os = "linux")]
 mod discover;
-#[cfg(target_os = "linux")]
 mod filenames;
-#[cfg(target_os = "linux")]
 mod init;
-#[cfg(target_os = "linux")]
 mod lock;
-#[cfg(target_os = "linux")]
 mod merge;
-#[cfg(target_os = "linux")]
 mod mountinfo;
-#[cfg(target_os = "linux")]
 mod project_roots;
-#[cfg(target_os = "linux")]
 mod projects;
-#[cfg(target_os = "linux")]
 mod prune;
-#[cfg(target_os = "linux")]
 mod reload;
-#[cfg(target_os = "linux")]
 mod roots;
-#[cfg(target_os = "linux")]
 mod scan;
-#[cfg(target_os = "linux")]
 mod snapper;
-#[cfg(all(target_os = "linux", test))]
+#[cfg(test)]
 mod test_support;
-#[cfg(target_os = "linux")]
 mod vcs;
-#[cfg(target_os = "linux")]
 mod xdg;
 
-#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
 use clap::{CommandFactory, Parser, Subcommand};
-#[cfg(target_os = "linux")]
 use clap_complete::engine::ArgValueCompleter;
 
 /// `CARGO_PKG_VERSION` is trusted verbatim on every branch - real
@@ -66,7 +42,6 @@ use clap_complete::engine::ArgValueCompleter;
 /// metadata, not part of the version number: `VERGEN_GIT_DESCRIBE`
 /// (via `build.rs`) pins down exactly which commit was built, and
 /// `VERGEN_GIT_BRANCH` says which branch it was built from.
-#[cfg(target_os = "linux")]
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -76,7 +51,6 @@ const VERSION: &str = concat!(
     ")"
 );
 
-#[cfg(target_os = "linux")]
 #[derive(Parser)]
 #[command(
     name = "ghostvolumes",
@@ -88,7 +62,6 @@ struct Cli {
     command: Command,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum Command {
     /// Manage roots.d: detect BTRFS roots, list the effective config
@@ -212,7 +185,6 @@ enum Command {
     },
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum RootsAction {
     /// Detect BTRFS snapshot-managed roots (dry run unless --save)
@@ -235,7 +207,6 @@ enum RootsAction {
     },
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum ProjectsAction {
     /// List every registered project root, flagging any that no longer exist
@@ -257,12 +228,10 @@ enum ProjectsAction {
 /// names, since `..` past a missing directory can't be resolved. Every
 /// path argument goes through this, so a relative argument never
 /// silently operates relative to whatever the cwd happens to be.
-#[cfg(target_os = "linux")]
 /// The earlier snapshot `prune --since` compares with: `Ok(None)` when
 /// there's none yet (a first run: everything is new), `Err` when it can't
 /// be determined — Snapper failed, or `config` belongs to another
 /// subvolume (then everything is reported too, but summarized in the log).
-#[cfg(target_os = "linux")]
 fn baseline_snapshot(
     snapshot: &std::path::Path,
     subvolume: &std::path::Path,
@@ -333,50 +302,6 @@ fn absolutize(path: &str) -> anyhow::Result<PathBuf> {
     Ok(abs)
 }
 
-#[cfg(all(target_os = "linux", test))]
-mod absolutize_tests {
-    use super::absolutize;
-    use std::path::PathBuf;
-
-    #[test]
-    fn an_already_absolute_path_is_returned_unchanged() {
-        assert_eq!(
-            absolutize("/already/absolute/path").unwrap(),
-            PathBuf::from("/already/absolute/path")
-        );
-    }
-
-    #[test]
-    fn a_relative_path_resolves_against_the_current_directory() {
-        // Only ever *reads* the current directory, never sets it - a
-        // test that changed it would race every other test running
-        // concurrently in this same process.
-        let expected = std::env::current_dir().unwrap().join("some-subdir");
-        assert_eq!(absolutize("some-subdir").unwrap(), expected);
-    }
-
-    #[test]
-    fn symlinks_and_dot_dot_resolve_like_the_kernel_not_lexically() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        std::fs::create_dir_all(root.join("real/a")).unwrap();
-        std::fs::create_dir(root.join("other")).unwrap();
-        std::os::unix::fs::symlink("../real", root.join("other/link")).unwrap();
-        let abs = |p: &str| absolutize(root.join(p).to_str().unwrap()).unwrap();
-        assert_eq!(abs("other/link/a"), root.join("real/a"));
-        // Lexically this would be `other/link`; the kernel says `real`.
-        assert_eq!(abs("other/link/a/.."), root.join("real"));
-        assert_eq!(abs("other/link/new/deeper"), root.join("real/new/deeper"));
-    }
-
-    #[test]
-    fn dot_dot_after_a_missing_directory_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(absolutize(dir.path().join("missing/../x").to_str().unwrap()).is_err());
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
@@ -766,8 +691,45 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("GhostVolumes only supports Linux with BTRFS.");
-    std::process::exit(1);
+#[cfg(test)]
+mod absolutize_tests {
+    use super::absolutize;
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_already_absolute_path_is_returned_unchanged() {
+        assert_eq!(
+            absolutize("/already/absolute/path").unwrap(),
+            PathBuf::from("/already/absolute/path")
+        );
+    }
+
+    #[test]
+    fn a_relative_path_resolves_against_the_current_directory() {
+        // Only ever *reads* the current directory, never sets it - a
+        // test that changed it would race every other test running
+        // concurrently in this same process.
+        let expected = std::env::current_dir().unwrap().join("some-subdir");
+        assert_eq!(absolutize("some-subdir").unwrap(), expected);
+    }
+
+    #[test]
+    fn symlinks_and_dot_dot_resolve_like_the_kernel_not_lexically() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real/a")).unwrap();
+        std::fs::create_dir(root.join("other")).unwrap();
+        std::os::unix::fs::symlink("../real", root.join("other/link")).unwrap();
+        let abs = |p: &str| absolutize(root.join(p).to_str().unwrap()).unwrap();
+        assert_eq!(abs("other/link/a"), root.join("real/a"));
+        // Lexically this would be `other/link`; the kernel says `real`.
+        assert_eq!(abs("other/link/a/.."), root.join("real"));
+        assert_eq!(abs("other/link/new/deeper"), root.join("real/new/deeper"));
+    }
+
+    #[test]
+    fn dot_dot_after_a_missing_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(absolutize(dir.path().join("missing/../x").to_str().unwrap()).is_err());
+    }
 }
